@@ -1,10 +1,10 @@
-"""Seeder principal de Woffy Go.
+﻿"""Seeder principal de Woffy Go.
 
 Uso:
     python -m app.seeders.run
 
-Carga 1 admin, 2 dueños, 2 paseadores y 3 mascotas.
-Todos los usuarios tienen la contraseña: test123
+Carga 1 admin, 2 dueÃ±os, 2 paseadores y 3 mascotas.
+Todos los usuarios tienen la contraseÃ±a: test123
 """
 from decimal import Decimal
 
@@ -87,8 +87,8 @@ def seed_walker_profiles(db, users: dict) -> None:
     profiles = [
         WalkerProfile(
             user_id=users["walker1"].id,
-            bio="Amante de los perros. 5 años de experiencia.",
-            hourly_rate=Decimal("3000.00"),
+            bio="Amante de los perros. 5 aÃ±os de experiencia.",
+            hourly_rate=Decimal("6000.00"),
             search_radius_km=5,
             is_online=True,
             current_location=WKTElement("POINT(-58.4287 -34.5795)", srid=4326),
@@ -98,7 +98,7 @@ def seed_walker_profiles(db, users: dict) -> None:
         WalkerProfile(
             user_id=users["walker2"].id,
             bio="Estudiante de veterinaria. Disponible fines de semana.",
-            hourly_rate=Decimal("3200.00"),
+            hourly_rate=Decimal("6500.00"),
             search_radius_km=8,
             is_online=False,
             current_location=WKTElement("POINT(-58.3974 -34.5875)", srid=4326),
