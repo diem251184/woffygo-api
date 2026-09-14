@@ -1,11 +1,11 @@
-from fastapi import FastAPI
+﻿from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import admin, auth, messages, pets, walkers, walks, payments
 
 
 app = FastAPI(
-    title="Woffy Go API",
+    title="Woofy Go API",
     version="0.1.0",
     description="Backend de Woffy Go - paseo de perros en tiempo real",
 )
