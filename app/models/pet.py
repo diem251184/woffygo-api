@@ -24,3 +24,4 @@ class Pet(Base):
     )
 
     owner = relationship("User", back_populates="pets")
+    walk_pets = relationship("WalkPet", back_populates="pet")

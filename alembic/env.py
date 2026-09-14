@@ -8,10 +8,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from app.core.config import settings
 from app.core.database import Base
-from app import models  # noqa: F401 - registra los 5 modelos en Base.metadata
+from app import models  # noqa: F401 - registra los modelos en Base.metadata
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+
+# Permitir override de la URL via variable de entorno NEON_DATABASE_URL.
+# Si existe, se usa esa (por ej. para migrar la base de Neon).
+# Si no, se usa la del .env (base local).
+_db_url = os.environ.get("NEON_DATABASE_URL") or settings.DATABASE_URL
+config.set_main_option("sqlalchemy.url", _db_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

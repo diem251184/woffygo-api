@@ -23,4 +23,4 @@ class WalkPet(Base):
     )
 
     walk = relationship("Walk", back_populates="walk_pets")
-    pet = relationship("Pet")
+    pet = relationship("Pet", back_populates="walk_pets")
