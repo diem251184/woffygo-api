@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from geoalchemy2.elements import WKTElement
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -67,6 +68,19 @@ def list_available(
     return list_available_walks(db)
 
 
+def _attach_pickup_coords(db: Session, walk: Walk) -> None:
+    """Carga pickup_latitude/longitude en el objeto Walk (via PostGIS)."""
+    sql = text(
+        "SELECT ST_Y(CAST(pickup_location AS geometry)) AS lat, "
+        "ST_X(CAST(pickup_location AS geometry)) AS lon "
+        "FROM walks WHERE id = :id"
+    )
+    row = db.execute(sql, {"id": walk.id}).first()
+    if row is not None:
+        walk._pickup_latitude = float(row.lat) if row.lat is not None else None
+        walk._pickup_longitude = float(row.lon) if row.lon is not None else None
+
+
 @router.get("/{walk_id}", response_model=WalkResponse)
 def get_one(
     walk_id: int,
@@ -85,6 +99,7 @@ def get_one(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No tenes acceso a este paseo",
         )
+    _attach_pickup_coords(db, walk)
     return walk
 
 

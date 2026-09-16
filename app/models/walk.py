@@ -92,3 +92,12 @@ class Walk(Base):
     @property
     def pets(self) -> list:
         return [wp.pet for wp in self.walk_pets]
+
+    @property
+    def pickup_latitude(self) -> float | None:
+        return getattr(self, "_pickup_latitude", None)
+
+    @property
+    def pickup_longitude(self) -> float | None:
+        return getattr(self, "_pickup_longitude", None)
+
