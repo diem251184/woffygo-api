@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import HTTPException, status
+from sqlalchemy import text
 from geoalchemy2.elements import WKTElement
 from sqlalchemy.orm import Session
 
@@ -289,3 +290,100 @@ def list_available_walks(db: Session) -> list[Walk]:
         .order_by(Walk.created_at.asc())
         .all()
     )
+
+def list_walk_locations(
+    db: Session,
+    walk_id: int,
+    user: User,
+    limit: int = 500,
+) -> list[dict]:
+    """Devuelve la lista de ubicaciones GPS de un paseo, ordenadas por tiempo.
+
+    Solo el owner, el walker asignado o un admin pueden verlas.
+    """
+    walk = _get_walk_or_404(db, walk_id)
+    is_owner = walk.owner_id == user.id
+    is_walker = walk.walker_id == user.id
+    is_admin = user.role == UserRole.ADMIN
+    if not (is_owner or is_walker or is_admin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tenes acceso a las ubicaciones de este paseo",
+        )
+
+    sql = text(
+        """
+        SELECT
+            id,
+            walk_id,
+            ST_Y(CAST(location AS geometry)) AS latitude,
+            ST_X(CAST(location AS geometry)) AS longitude,
+            accuracy_meters,
+            speed_kmh,
+            recorded_at
+        FROM walk_locations
+        WHERE walk_id = :walk_id
+        ORDER BY recorded_at ASC
+        LIMIT :limit
+        """
+    )
+    rows = db.execute(sql, {"walk_id": walk_id, "limit": limit}).all()
+    return [
+        {
+            "id": r.id,
+            "walk_id": r.walk_id,
+            "latitude": float(r.latitude),
+            "longitude": float(r.longitude),
+            "accuracy_meters": r.accuracy_meters,
+            "speed_kmh": r.speed_kmh,
+            "recorded_at": r.recorded_at,
+        }
+        for r in rows
+    ]
+
+
+def get_latest_walk_location(
+    db: Session,
+    walk_id: int,
+    user: User,
+) -> dict | None:
+    """Devuelve la ultima ubicacion GPS conocida de un paseo, o None."""
+    walk = _get_walk_or_404(db, walk_id)
+    is_owner = walk.owner_id == user.id
+    is_walker = walk.walker_id == user.id
+    is_admin = user.role == UserRole.ADMIN
+    if not (is_owner or is_walker or is_admin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tenes acceso a las ubicaciones de este paseo",
+        )
+
+    sql = text(
+        """
+        SELECT
+            id,
+            walk_id,
+            ST_Y(CAST(location AS geometry)) AS latitude,
+            ST_X(CAST(location AS geometry)) AS longitude,
+            accuracy_meters,
+            speed_kmh,
+            recorded_at
+        FROM walk_locations
+        WHERE walk_id = :walk_id
+        ORDER BY recorded_at DESC
+        LIMIT 1
+        """
+    )
+    row = db.execute(sql, {"walk_id": walk_id}).first()
+    if row is None:
+        return None
+    return {
+        "id": row.id,
+        "walk_id": row.walk_id,
+        "latitude": float(row.latitude),
+        "longitude": float(row.longitude),
+        "accuracy_meters": row.accuracy_meters,
+        "speed_kmh": row.speed_kmh,
+        "recorded_at": row.recorded_at,
+    }
+

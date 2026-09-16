@@ -15,7 +15,7 @@ class WalkCreate(BaseModel):
     pickup_latitude: float = Field(ge=-90, le=90)
     pickup_longitude: float = Field(ge=-180, le=180)
     pickup_address: str = Field(min_length=5, max_length=300)
-    duration_minutes: int = Field(default=30, ge=15, le=180)
+    duration_minutes: int = Field(default=60, ge=60, le=180)
     notes: str | None = Field(default=None, max_length=500)
 
     @field_validator("pet_ids")
@@ -73,3 +73,15 @@ class WalkResponse(BaseModel):
     distance_meters: Decimal | None
     pet_ids: list[int]
     pets: list[PetMinimal]
+
+class WalkLocationDetail(BaseModel):
+    """Ubicacion GPS con lat/lon extraidos, para el mapa en vivo."""
+
+    id: int
+    walk_id: int
+    latitude: float
+    longitude: float
+    accuracy_meters: Decimal | None
+    speed_kmh: Decimal | None
+    recorded_at: datetime
+

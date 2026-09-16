@@ -11,6 +11,7 @@ from app.schemas.walk import (
     WalkCancelRequest,
     WalkCreate,
     WalkLocationCreate,
+    WalkLocationDetail,
     WalkLocationResponse,
     WalkResponse,
 )
@@ -19,7 +20,9 @@ from app.services.walks import (
     cancel_walk,
     create_walk,
     finish_walk,
+    get_latest_walk_location,
     list_available_walks,
+    list_walk_locations,
     list_walks_for_user,
     start_walk,
 )
@@ -152,3 +155,22 @@ def cancel(
     db: Session = Depends(get_db),
 ):
     return cancel_walk(db, current_user, walk_id, payload.reason)
+
+@router.get("/{walk_id}/locations", response_model=list[WalkLocationDetail])
+def get_walk_locations(
+    walk_id: int,
+    limit: int = Query(default=500, ge=1, le=2000),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return list_walk_locations(db, walk_id, current_user, limit)
+
+
+@router.get("/{walk_id}/locations/latest", response_model=WalkLocationDetail | None)
+def get_walk_latest_location(
+    walk_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return get_latest_walk_location(db, walk_id, current_user)
+
