@@ -60,9 +60,12 @@ def create_checkout(
     db: Session,
     walk: Walk,
     owner: User,
-    base_url: str = "http://127.0.0.1:8000",
+    base_url: str | None = None,
 ) -> Payment:
     """Crea una preferencia de pago y devuelve el Payment con init_point."""
+    if base_url is None:
+        base_url = settings.PUBLIC_BASE_URL
+
     if walk.owner_id != owner.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

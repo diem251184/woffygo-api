@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     MIN_HOURLY_RATE: Decimal = Decimal("2500.00")
     MAX_HOURLY_RATE: Decimal = Decimal("3500.00")
 
+    PUBLIC_BASE_URL: str = "https://woffygo-api.onrender.com"
+
     @field_validator("MAX_HOURLY_RATE")
     @classmethod
     def max_must_be_greater_than_min(cls, v: Decimal, info) -> Decimal:
