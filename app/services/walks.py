@@ -17,7 +17,21 @@ from app.services.escrow import start_escrow_window
 from app.services.verification import verify_walk_integrity
 
 
-PLATFORM_FEE_RATE = Decimal("0.15")
+# Comision escalonada por cantidad de paseos completados
+COMMISSION_TIERS = [
+    # (min_paseos, max_paseos, comision)
+    (0, 10, Decimal("0.20")),      # 0-9 paseos -> 20%
+    (10, 50, Decimal("0.15")),     # 10-49 paseos -> 15%
+    (50, 999999, Decimal("0.12")), # 50+ paseos -> 12%
+]
+
+
+def get_platform_fee_rate(total_walks: int) -> Decimal:
+    """Devuelve la comision segun la cantidad de paseos completados."""
+    for min_w, max_w, rate in COMMISSION_TIERS:
+        if min_w <= total_walks < max_w:
+            return rate
+    return Decimal("0.15")  # fallback
 MAX_PETS_PER_WALK = 3
 
 # Multiplicadores de precio por cantidad de mascotas.
@@ -159,7 +173,8 @@ def accept_walk(db: Session, walker_user: User, walk_id: int) -> Walk:
     base_price = profile.hourly_rate * hours
     multiplier_sum = sum(PET_MULTIPLIERS[:num_pets], Decimal("0"))
     price = (base_price * multiplier_sum).quantize(Decimal("0.01"))
-    fee = (price * PLATFORM_FEE_RATE).quantize(Decimal("0.01"))
+    fee_rate = get_platform_fee_rate(profile.total_walks)
+    fee = (price * fee_rate).quantize(Decimal("0.01"))
     earnings = price - fee
 
     walk.walker_id = walker_user.id
