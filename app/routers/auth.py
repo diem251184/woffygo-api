@@ -6,6 +6,7 @@ from app.core.deps import get_current_user
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models.user import User, UserRole
 from app.schemas.user import Token, UserCreate, UserLogin, UserResponse, UserUpdate
+from app.services import account
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -75,3 +76,12 @@ def update_me(
     db.commit()
     db.refresh(current_user)
     return current_user
+
+@router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
+def delete_me(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Elimina la cuenta del usuario autenticado (anonimiza datos)."""
+    account.delete_account(db, current_user)
+
