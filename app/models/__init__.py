@@ -6,6 +6,7 @@ from app.models.walk_pet import WalkPet
 from app.models.walk_location import WalkLocation
 from app.models.payment import Payment, PaymentStatus
 from app.models.message import Message
+from app.models.review import Review
 
 __all__ = [
     "User",
@@ -19,4 +20,5 @@ __all__ = [
     "Payment",
     "PaymentStatus",
     "Message",
+    "Review",
 ]
