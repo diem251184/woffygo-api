@@ -75,6 +75,7 @@ class WalkResponse(BaseModel):
     pets: list[PetMinimal]
     pickup_latitude: float | None = None
     pickup_longitude: float | None = None
+    current_distance_meters: Decimal | None = None
 
 class WalkLocationDetail(BaseModel):
     """Ubicacion GPS con lat/lon extraidos, para el mapa en vivo."""

@@ -69,7 +69,7 @@ def list_available(
 
 
 def _attach_pickup_coords(db: Session, walk: Walk) -> None:
-    """Carga pickup_latitude/longitude en el objeto Walk (via PostGIS)."""
+    """Carga pickup_lat/lon y distancia en vivo (via PostGIS)."""
     sql = text(
         "SELECT ST_Y(CAST(pickup_location AS geometry)) AS lat, "
         "ST_X(CAST(pickup_location AS geometry)) AS lon "
@@ -79,6 +79,17 @@ def _attach_pickup_coords(db: Session, walk: Walk) -> None:
     if row is not None:
         walk._pickup_latitude = float(row.lat) if row.lat is not None else None
         walk._pickup_longitude = float(row.lon) if row.lon is not None else None
+
+    # Distancia en vivo: suma de segmentos de la ruta GPS
+    dist_sql = text(
+        "SELECT ST_Length(CAST(ST_MakeLine(CAST(location AS geometry) ORDER BY recorded_at) AS geography)) AS dist_m "
+        "FROM walk_locations WHERE walk_id = :id"
+    )
+    dist_row = db.execute(dist_sql, {"id": walk.id}).first()
+    if dist_row is not None and dist_row.dist_m is not None:
+        walk._current_distance_meters = round(float(dist_row.dist_m), 2)
+    else:
+        walk._current_distance_meters = None
 
 
 @router.get("/{walk_id}", response_model=WalkResponse)

@@ -101,3 +101,7 @@ class Walk(Base):
     def pickup_longitude(self) -> float | None:
         return getattr(self, "_pickup_longitude", None)
 
+    @property
+    def current_distance_meters(self) -> Decimal | None:
+        return getattr(self, "_current_distance_meters", None)
+
