@@ -44,6 +44,8 @@ def delete_account(db: Session, user: User) -> None:
         if profile is not None:
             profile.is_online = False
             profile.current_location = None
+            profile.bio = None
+            profile.last_location_update = None
 
     # Anonimizar
     user.email = f"deleted_{user.id}@woffygo.local"
