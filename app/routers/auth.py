@@ -6,6 +6,8 @@ from app.core.deps import get_current_user
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models.user import User, UserRole
 from app.schemas.user import Token, UserCreate, UserLogin, UserResponse, UserUpdate
+from app.schemas.device_token import DeviceTokenCreate
+from app.models.device_token import DeviceToken
 from app.services import account
 
 
@@ -84,4 +86,29 @@ def delete_me(
 ):
     """Elimina la cuenta del usuario autenticado (anonimiza datos)."""
     account.delete_account(db, current_user)
+
+@router.post("/device-token", status_code=status.HTTP_204_NO_CONTENT)
+def register_device_token(
+    payload: DeviceTokenCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Registra o actualiza el token de push del dispositivo actual."""
+    existing = (
+        db.query(DeviceToken)
+        .filter(DeviceToken.token == payload.token)
+        .first()
+    )
+    if existing is not None:
+        existing.user_id = current_user.id
+        existing.platform = payload.platform
+        existing.is_active = True
+    else:
+        db.add(DeviceToken(
+            user_id=current_user.id,
+            token=payload.token,
+            platform=payload.platform,
+            is_active=True,
+        ))
+    db.commit()
 

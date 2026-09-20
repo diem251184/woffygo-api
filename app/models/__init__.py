@@ -7,6 +7,7 @@ from app.models.walk_location import WalkLocation
 from app.models.payment import Payment, PaymentStatus
 from app.models.message import Message
 from app.models.review import Review
+from app.models.device_token import DeviceToken
 
 __all__ = [
     "User",
@@ -21,4 +22,5 @@ __all__ = [
     "PaymentStatus",
     "Message",
     "Review",
+    "DeviceToken",
 ]

@@ -14,6 +14,7 @@ from app.models.walk_pet import WalkPet
 from app.models.walker_profile import WalkerProfile
 from app.schemas.walk import WalkCreate
 from app.services.escrow import start_escrow_window
+from app.services import push
 from app.services.verification import verify_walk_integrity
 
 
@@ -131,6 +132,13 @@ def create_walk(db: Session, owner: User, payload: WalkCreate) -> Walk:
 
     db.commit()
     db.refresh(walk)
+
+    # Notificar a walkers online cercanos
+    try:
+        _notify_nearby_walkers_new_walk(db, walk, pets)
+    except Exception as e:
+        print(f"[push] Error notificando walkers: {e}")
+
     return walk
 
 
@@ -185,6 +193,19 @@ def accept_walk(db: Session, walker_user: User, walk_id: int) -> Walk:
     walk.walker_earnings = earnings
     db.commit()
     db.refresh(walk)
+
+    # Notificar al owner
+    try:
+        push.send_to_user(
+            db,
+            walk.owner_id,
+            "\u00a1Paseador asignado!",
+            f"{walker_user.full_name} acept\u00f3 el paseo. Precio: ${price}",
+            {"type": "walk_accepted", "walk_id": walk.id},
+        )
+    except Exception as e:
+        print(f"[push] Error notificando owner (accept): {e}")
+
     return walk
 
 
@@ -237,6 +258,18 @@ def finish_walk(db: Session, walker_user: User, walk_id: int) -> Walk:
 
     verify_walk_integrity(db, walk)
     start_escrow_window(db, walk.id)
+
+    # Notificar al owner
+    try:
+        push.send_to_user(
+            db,
+            walk.owner_id,
+            "Paseo finalizado",
+            "Tu mascota ya est\u00e1 de vuelta. Confirma la entrega para liberar el pago.",
+            {"type": "walk_finished", "walk_id": walk.id},
+        )
+    except Exception as e:
+        print(f"[push] Error notificando owner (finish): {e}")
 
     db.refresh(walk)
     return walk
@@ -401,4 +434,42 @@ def get_latest_walk_location(
         "speed_kmh": row.speed_kmh,
         "recorded_at": row.recorded_at,
     }
+
+def _notify_nearby_walkers_new_walk(db: Session, walk: Walk, pets: list) -> None:
+    """Notifica a los walkers online dentro de 10 km que hay un paseo nuevo."""
+    from app.models.user import User as _User
+    from app.models.walker_profile import WalkerProfile as _Wp
+    from geoalchemy2 import Geometry
+    from sqlalchemy import text
+
+    # Buscar walkers online dentro de 10 km
+    sql = text(
+        """
+        SELECT wp.user_id
+        FROM walker_profiles wp
+        JOIN users u ON u.id = wp.user_id
+        WHERE wp.is_online = true
+          AND u.is_active = true
+          AND wp.current_location IS NOT NULL
+          AND ST_DWithin(
+              wp.current_location,
+              (SELECT pickup_location FROM walks WHERE id = :walk_id),
+              10000
+          )
+        """
+    )
+    rows = db.execute(sql, {"walk_id": walk.id}).all()
+    user_ids = [r.user_id for r in rows]
+
+    if not user_ids:
+        return
+
+    pets_str = ", ".join(p.name for p in pets)
+    push.send_to_users(
+        db,
+        user_ids,
+        "\ud83d\udd14 Nuevo paseo disponible",
+        f"{pets_str} \u00b7 {walk.duration_minutes} min\n{walk.pickup_address}",
+        {"type": "new_walk", "walk_id": walk.id},
+    )
 

@@ -14,3 +14,4 @@ geoalchemy2==0.16.0
 mercadopago==2.2.1
 email-validator==2.2.0
 gunicorn==23.0.0
+httpx==0.27.2
