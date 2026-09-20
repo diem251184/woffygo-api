@@ -81,10 +81,11 @@ def _build_message(token: str, title: str, body: str, data: dict | None = None) 
         "to": token,
         "title": title,
         "body": body,
-        "priority": "high",
-        "channelId": "walks-v2",
-        "sound": None,
+        "priority": "max",
+        "channelId": "walks-v3",
+        "sound": "default",
         "vibrate": [0, 250, 250, 250],
+        "badge": 1,
     }
     if data:
         msg["data"] = data
