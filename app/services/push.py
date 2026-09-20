@@ -82,7 +82,7 @@ def _build_message(token: str, title: str, body: str, data: dict | None = None) 
         "title": title,
         "body": body,
         "priority": "high",
-        "channelId": "walks",
+        "channelId": "walks-v2",
         "sound": None,
         "vibrate": [0, 250, 250, 250],
     }
