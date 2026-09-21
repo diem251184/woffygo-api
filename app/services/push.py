@@ -57,11 +57,13 @@ def _send_batch(messages: list[dict]) -> list[dict]:
         return []
     import json as _json
     print(f"[push] Payload a enviar: {_json.dumps(messages)}")
+    # Expo espera objeto si es 1 solo mensaje, array si son 2+
+    payload = messages[0] if len(messages) == 1 else messages
     try:
         with httpx.Client(timeout=15.0) as client:
             response = client.post(
                 EXPO_PUSH_URL,
-                json=messages,
+                json=payload,
                 headers={
                     "Accept": "application/json",
                     "Accept-Encoding": "gzip, deflate",
@@ -85,8 +87,8 @@ def _build_message(token: str, title: str, body: str, data: dict | None = None) 
         "to": token,
         "title": title,
         "body": body,
-        "priority": "max",
-        "channelId": "walks-v3",
+        "priority": "high",
+        "channelId": "walks-final",
         "sound": "default",
         "vibrate": [0, 250, 250, 250],
         "badge": 1,
