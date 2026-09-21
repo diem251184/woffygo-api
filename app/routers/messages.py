@@ -8,6 +8,7 @@ from app.models.user import User, UserRole
 from app.models.walk import Walk, WalkStatus
 from app.schemas.message import MessageCreate, MessageResponse
 from app.services.chat_filter import filter_contact_info
+from app.services import push
 
 
 router = APIRouter(prefix="/walks/{walk_id}/messages", tags=["messages"])
@@ -71,6 +72,28 @@ def send_message(
     db.add(msg)
     db.commit()
     db.refresh(msg)
+
+    # Notificar al receptor del mensaje (no al que lo envia)
+    try:
+        recipient_id: int | None = None
+        if current_user.id == walk.owner_id and walk.walker_id is not None:
+            recipient_id = walk.walker_id
+        elif current_user.id == walk.walker_id:
+            recipient_id = walk.owner_id
+
+        if recipient_id is not None:
+            preview = filtered[:80] + ("..." if len(filtered) > 80 else "")
+            sender_name = current_user.full_name
+            push.send_to_user(
+                db,
+                recipient_id,
+                f"Nuevo mensaje de {sender_name}",
+                preview,
+                {"type": "new_message", "walk_id": walk.id, "message_id": msg.id},
+            )
+    except Exception as e:
+        print(f"[push] Error notificando mensaje: {e}")
+
     return msg
 
 
