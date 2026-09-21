@@ -55,6 +55,8 @@ def _send_batch(messages: list[dict]) -> list[dict]:
     """Envia hasta 100 mensajes a Expo Push API. Devuelve la lista de resultados."""
     if not messages:
         return []
+    import json as _json
+    print(f"[push] Payload a enviar: {_json.dumps(messages)}")
     try:
         with httpx.Client(timeout=15.0) as client:
             response = client.post(
@@ -66,6 +68,8 @@ def _send_batch(messages: list[dict]) -> list[dict]:
                     "Content-Type": "application/json",
                 },
             )
+            if response.status_code >= 400:
+                print(f"[push] ERROR {response.status_code}: {response.text}")
             response.raise_for_status()
             data = response.json()
             if isinstance(data, dict) and "data" in data:
