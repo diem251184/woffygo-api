@@ -56,12 +56,15 @@ def send_password_reset_email(to: str, full_name: str, token: str) -> bool:
     """Envia el email de recuperacion con el link para resetear la contrasena."""
     reset_link = f"{settings.FRONTEND_RESET_URL}?token={token}"
     minutos = settings.PASSWORD_RESET_TOKEN_MINUTES
-    subject = "Woofy Go - Recuperar contrasena"
+    subject = "Woofy Go - Recuperar contrase\u00f1a"
 
     # DEBUG: log del token para poder testear en desarrollo.
     # Comentar este print cuando el flujo este 100% verificado en produccion.
     print(f"[email] DEBUG token para {to}: {token}")
 
+    # Usamos entidades HTML (&ntilde;, &oacute;, etc.) para garantizar
+    # que la ñ y los acentos se vean bien en TODOS los clientes de email,
+    # sin depender de que respeten el encoding UTF-8.
     html = f"""
 <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #1F2937;">
   <div style="background: #1B4332; color: #FFFFFF; padding: 20px; border-radius: 12px 12px 0 0; text-align: center;">
@@ -70,19 +73,19 @@ def send_password_reset_email(to: str, full_name: str, token: str) -> bool:
   <div style="background: #FFFFFF; padding: 24px; border: 1px solid #E5E7EB; border-top: none; border-radius: 0 0 12px 12px;">
     <p style="font-size: 16px; margin-top: 0;">Hola {full_name},</p>
     <p style="font-size: 15px; line-height: 22px;">
-      Recibimos una solicitud para restablecer tu contrasena en Woofy Go.
-      Hace click en el boton de abajo para elegir una nueva.
+      Recibimos una solicitud para restablecer tu contrase&ntilde;a en Woofy Go.
+      Hac&eacute; click en el bot&oacute;n de abajo para elegir una nueva.
     </p>
     <p style="text-align: center; margin: 28px 0;">
       <a href="{reset_link}" style="display: inline-block; background: #C9A961; color: #FFFFFF; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 700; font-size: 15px;">
-        Restablecer contrasena
+        Restablecer contrase&ntilde;a
       </a>
     </p>
     <p style="font-size: 13px; color: #6B7280; line-height: 20px;">
-      Si vos no pediste esto, podes ignorar este email. El link caduca en {minutos} minutos.
+      Si vos no pediste esto, pod&eacute;s ignorar este email. El link caduca en {minutos} minutos.
     </p>
     <p style="font-size: 12px; color: #9CA3AF; margin-top: 24px; border-top: 1px solid #E5E7EB; padding-top: 16px;">
-      Si el boton no funciona, copia y pega este link en tu navegador:<br/>
+      Si el bot&oacute;n no funciona, copi&aacute; y peg&aacute; este link en tu navegador:<br/>
       <span style="word-break: break-all;">{reset_link}</span>
     </p>
   </div>

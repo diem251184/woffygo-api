@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -236,3 +237,138 @@ def reset_password(
     return PasswordResetResponse(
         message="Contrasena actualizada. Ya podes iniciar sesion con la nueva."
     )
+
+# ---------------------------------------------------------------
+# Reset redirect: pagina intermedia que convierte un link https
+# en un deep link woffygo:// para que Gmail / navegadores lo acepten.
+# ---------------------------------------------------------------
+
+def _redirect_html(deep_link: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Woofy Go - Restablecer contrasena</title>
+<style>
+  body {{
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #1B4332;
+    color: #FFFFFF;
+    display: flex;
+    min-height: 100vh;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    box-sizing: border-box;
+  }}
+  .card {{
+    background: #FFFFFF;
+    color: #1F2937;
+    border-radius: 16px;
+    padding: 32px 24px;
+    max-width: 420px;
+    width: 100%;
+    text-align: center;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+  }}
+  .logo {{
+    font-size: 22px;
+    font-weight: 800;
+    color: #1B4332;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+  }}
+  h1 {{
+    font-size: 20px;
+    margin: 16px 0 8px 0;
+    color: #1F2937;
+  }}
+  p {{
+    font-size: 14px;
+    color: #6B7280;
+    line-height: 21px;
+    margin: 0 0 20px 0;
+  }}
+  .btn {{
+    display: inline-block;
+    background: #C9A961;
+    color: #FFFFFF;
+    padding: 14px 28px;
+    border-radius: 10px;
+    text-decoration: none;
+    font-weight: 700;
+    font-size: 15px;
+    margin-top: 8px;
+  }}
+  .hint {{
+    font-size: 12px;
+    color: #9CA3AF;
+    margin-top: 20px;
+  }}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">Woofy Go</div>
+    <h1>Restablecer contrasena</h1>
+    <p>Estamos abriendo la app para que puedas elegir una nueva contrasena...</p>
+    <a class="btn" href="{deep_link}">Abrir Woofy Go</a>
+    <p class="hint">Si no se abre sola, toc&aacute; el bot&oacute;n de arriba.</p>
+  </div>
+  <script>
+    // Intento 1: abrir el deep link automaticamente
+    window.location.href = "{deep_link}";
+    // Intento 2: por si el navegador bloquea el primero
+    setTimeout(function() {{
+      window.location.href = "{deep_link}";
+    }}, 300);
+  </script>
+</body>
+</html>
+"""
+
+
+def _invalid_link_html() -> str:
+    return """<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Woofy Go - Link invalido</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background: #1B4332; color: #FFFFFF; display: flex; min-height: 100vh;
+         align-items: center; justify-content: center; padding: 24px; margin: 0; box-sizing: border-box; }
+  .card { background: #FFFFFF; color: #1F2937; border-radius: 16px; padding: 32px 24px;
+          max-width: 420px; width: 100%; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.25); }
+  .logo { font-size: 22px; font-weight: 800; color: #1B4332; margin-bottom: 12px; }
+  h1 { font-size: 20px; margin: 8px 0; color: #B91C1C; }
+  p { font-size: 14px; color: #6B7280; line-height: 21px; margin: 0; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">Woofy Go</div>
+    <h1>Link invalido</h1>
+    <p>Este link no tiene un token valido. Pedi uno nuevo desde la pantalla de inicio de sesion.</p>
+  </div>
+</body>
+</html>
+"""
+
+
+@router.get("/reset-redirect", response_class=HTMLResponse, include_in_schema=False)
+def reset_redirect(token: str = "") -> HTMLResponse:
+    """Pagina intermedia que convierte un link https en un deep link woffygo://.
+
+    Necesario porque Gmail y los navegadores bloquean links con schemes custom.
+    El usuario toca un link https normal, el backend devuelve un HTML que
+    intenta abrir la app via el deep link woffygo://reset-password.
+    """
+    if not token or len(token) < 10:
+        return HTMLResponse(content=_invalid_link_html(), status_code=400)
+
+    deep_link = f"woffygo://reset-password?token={token}"
+    return HTMLResponse(content=_redirect_html(deep_link))
