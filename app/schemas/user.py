@@ -44,3 +44,16 @@ class TokenPayload(BaseModel):
     sub: str
     exp: int
     role: str | None = None
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=10, max_length=512)
+    new_password: str = Field(min_length=6, max_length=72)
+
+
+class PasswordResetResponse(BaseModel):
+    message: str

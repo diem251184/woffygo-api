@@ -27,6 +27,12 @@ class Settings(BaseSettings):
 
     PUBLIC_BASE_URL: str = "https://woffygo-api.onrender.com"
 
+    # Recuperacion de contrasena (Resend)
+    RESEND_API_KEY: str = ""
+    EMAIL_FROM: str = "onboarding@resend.dev"
+    FRONTEND_RESET_URL: str = "woffygo://reset-password"
+    PASSWORD_RESET_TOKEN_MINUTES: int = 30
+
     @field_validator("MAX_HOURLY_RATE")
     @classmethod
     def max_must_be_greater_than_min(cls, v: Decimal, info) -> Decimal:

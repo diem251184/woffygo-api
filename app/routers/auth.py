@@ -1,14 +1,34 @@
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_current_user
-from app.core.security import create_access_token, hash_password, verify_password
+from app.core.security import (
+    create_access_token,
+    generate_reset_token,
+    hash_password,
+    hash_reset_token,
+    verify_password,
+)
+from app.models.password_reset_token import PasswordResetToken
 from app.models.user import User, UserRole
-from app.schemas.user import Token, UserCreate, UserLogin, UserResponse, UserUpdate
+from app.schemas.user import (
+    ForgotPasswordRequest,
+    PasswordResetResponse,
+    ResetPasswordRequest,
+    Token,
+    UserCreate,
+    UserLogin,
+    UserResponse,
+    UserUpdate,
+)
 from app.schemas.device_token import DeviceTokenCreate
 from app.models.device_token import DeviceToken
 from app.services import account
+from app.services import email as email_service
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -79,6 +99,7 @@ def update_me(
     db.refresh(current_user)
     return current_user
 
+
 @router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
 def delete_me(
     current_user: User = Depends(get_current_user),
@@ -86,6 +107,7 @@ def delete_me(
 ):
     """Elimina la cuenta del usuario autenticado (anonimiza datos)."""
     account.delete_account(db, current_user)
+
 
 @router.post("/device-token", status_code=status.HTTP_204_NO_CONTENT)
 def register_device_token(
@@ -112,3 +134,105 @@ def register_device_token(
         ))
     db.commit()
 
+
+@router.post("/forgot-password", response_model=PasswordResetResponse)
+def forgot_password(
+    payload: ForgotPasswordRequest,
+    db: Session = Depends(get_db),
+) -> PasswordResetResponse:
+    """Solicita el reset de contrasena.
+
+    Por seguridad SIEMPRE devuelve 200 (no revela si el email existe o no).
+    Si el email existe, invalida tokens previos no usados, genera uno nuevo
+    y envia un email con el link de reset.
+    """
+    user = db.query(User).filter(User.email == payload.email).first()
+
+    if user is not None and user.is_active:
+        # Invalidar tokens previos no usados (por si pidio varias veces)
+        now = datetime.now(timezone.utc)
+        (
+            db.query(PasswordResetToken)
+            .filter(PasswordResetToken.user_id == user.id)
+            .filter(PasswordResetToken.used_at.is_(None))
+            .update({PasswordResetToken.used_at: now}, synchronize_session=False)
+        )
+
+        # Generar token nuevo
+        raw_token = generate_reset_token()
+        token_hash = hash_reset_token(raw_token)
+        expires_at = now + timedelta(minutes=settings.PASSWORD_RESET_TOKEN_MINUTES)
+
+        db.add(PasswordResetToken(
+            user_id=user.id,
+            token_hash=token_hash,
+            expires_at=expires_at,
+        ))
+        db.commit()
+
+        # Enviar email (no rompemos la request si falla el envio)
+        email_service.send_password_reset_email(
+            to=user.email,
+            full_name=user.full_name,
+            token=raw_token,
+        )
+
+    return PasswordResetResponse(
+        message="Si el email esta registrado, te enviamos un link para restablecer la contrasena."
+    )
+
+
+@router.post("/reset-password", response_model=PasswordResetResponse)
+def reset_password(
+    payload: ResetPasswordRequest,
+    db: Session = Depends(get_db),
+) -> PasswordResetResponse:
+    """Aplica el reset de contrasena con el token recibido por email."""
+    token_hash = hash_reset_token(payload.token)
+
+    row = (
+        db.query(PasswordResetToken)
+        .filter(PasswordResetToken.token_hash == token_hash)
+        .first()
+    )
+
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token invalido o expirado",
+        )
+
+    now = datetime.now(timezone.utc)
+
+    # Asegurar comparacion de datetimes timezone-aware
+    expires_at = row.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    if row.used_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Este link ya fue usado",
+        )
+
+    if expires_at < now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token expirado",
+        )
+
+    user = db.query(User).filter(User.id == row.user_id).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Usuario no encontrado",
+        )
+
+    # Actualizar password y marcar token como usado
+    user.password_hash = hash_password(payload.new_password)
+    row.used_at = now
+    db.commit()
+
+    return PasswordResetResponse(
+        message="Contrasena actualizada. Ya podes iniciar sesion con la nueva."
+    )
