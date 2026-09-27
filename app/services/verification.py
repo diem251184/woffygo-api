@@ -14,30 +14,64 @@ MIN_DURATION_RATIO = 0.01
 MAX_AVG_SPEED_KMH = 15.0
 MIN_AVG_SPEED_KMH = 0.5
 
+# --- Filtros de calidad GPS ---
+MAX_ACCURACY_METERS = 50.0
+MAX_REPORTED_SPEED_KMH = 20.0
+MIN_SEGMENT_METERS = 1.5
+MAX_SEGMENT_METERS = 200.0
+MAX_IMPLIED_SPEED_KMH = 20.0
+
 
 def _calculate_distance_meters(db: Session, walk_id: int) -> float:
     """Calcula la distancia geodeca total de la ruta en metros.
 
-    Usa SQL crudo con text() para evitar las conversiones automaticas de
-    GeoAlchemy2 que transforman el resultado de ST_MakeLine a WKB binario
-    (rompiendo ST_GeogFromText que espera WKT).
-
-    El CAST a geography es lo que hace que ST_Length devuelva metros en
-    lugar de grados (para SRID 4326).
+    Filtra puntos y segmentos para evitar que GPS impreciso infle la distancia.
     """
     sql = text(
         """
-        SELECT ST_Length(
-            CAST(
-                ST_MakeLine(CAST(location AS geometry) ORDER BY recorded_at)
-                AS geography
-            )
-        ) AS distance_m
-        FROM walk_locations
-        WHERE walk_id = :walk_id
+        WITH filtered_points AS (
+            SELECT
+                location,
+                recorded_at,
+                LAG(location) OVER (ORDER BY recorded_at) AS prev_location,
+                LAG(recorded_at) OVER (ORDER BY recorded_at) AS prev_recorded_at
+            FROM walk_locations
+            WHERE walk_id = :walk_id
+              AND (accuracy_meters IS NULL OR accuracy_meters <= :max_accuracy)
+              AND (speed_kmh IS NULL OR speed_kmh <= :max_reported_speed)
+        ),
+        segments AS (
+            SELECT
+                ST_Distance(
+                    CAST(location AS geography),
+                    CAST(prev_location AS geography)
+                ) AS seg_m,
+                EXTRACT(EPOCH FROM (recorded_at - prev_recorded_at)) AS seg_s
+            FROM filtered_points
+            WHERE prev_location IS NOT NULL
+        )
+        SELECT COALESCE(SUM(seg_m), 0) AS distance_m
+        FROM segments
+        WHERE seg_m >= :min_segment
+          AND seg_m <= :max_segment
+          AND (
+              seg_s IS NULL
+              OR seg_s <= 0
+              OR (seg_m / seg_s) * 3.6 <= :max_implied_speed
+          )
         """
     )
-    result = db.execute(sql, {"walk_id": walk_id}).scalar()
+    result = db.execute(
+        sql,
+        {
+            "walk_id": walk_id,
+            "max_accuracy": MAX_ACCURACY_METERS,
+            "max_reported_speed": MAX_REPORTED_SPEED_KMH,
+            "min_segment": MIN_SEGMENT_METERS,
+            "max_segment": MAX_SEGMENT_METERS,
+            "max_implied_speed": MAX_IMPLIED_SPEED_KMH,
+        },
+    ).scalar()
     if result is None:
         return 0.0
     return float(result)
