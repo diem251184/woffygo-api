@@ -32,6 +32,10 @@ def create_pet(db: Session, owner: User, payload: PetCreate) -> Pet:
         breed=payload.breed,
         age_years=payload.age_years,
         notes=payload.notes,
+        size=payload.size,
+        weight_kg=payload.weight_kg,
+        aggressive_with_dogs=payload.aggressive_with_dogs,
+        aggressive_with_people=payload.aggressive_with_people,
     )
     db.add(pet)
     db.commit()
@@ -66,6 +70,14 @@ def update_pet(db: Session, pet_id: int, user: User, payload: PetUpdate) -> Pet:
         pet.age_years = payload.age_years
     if payload.notes is not None:
         pet.notes = payload.notes
+    if payload.size is not None:
+        pet.size = payload.size
+    if payload.weight_kg is not None:
+        pet.weight_kg = payload.weight_kg
+    if payload.aggressive_with_dogs is not None:
+        pet.aggressive_with_dogs = payload.aggressive_with_dogs
+    if payload.aggressive_with_people is not None:
+        pet.aggressive_with_people = payload.aggressive_with_people
 
     db.commit()
     db.refresh(pet)

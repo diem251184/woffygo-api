@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, DateTime, ForeignKey, func
+from sqlalchemy import String, DateTime, ForeignKey, func, Float, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -16,6 +16,18 @@ class Pet(Base):
     breed: Mapped[str | None] = mapped_column(String(80), nullable=True)
     age_years: Mapped[int | None] = mapped_column(nullable=True)
     notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # Campos nuevos para seguridad del paseador
+    # size: "chico" | "mediano" | "grande" (nullable para no romper datos viejos)
+    size: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    weight_kg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    aggressive_with_dogs: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    aggressive_with_people: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
