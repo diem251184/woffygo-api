@@ -88,8 +88,8 @@ def _build_message(token: str, title: str, body: str, data: dict | None = None) 
         "title": title,
         "body": body,
         "priority": "high",
-        "channelId": "walks-final",
-        "sound": "default",
+        "channelId": "walks-v4",
+        "sound": "notification.wav",
         "vibrate": [0, 250, 250, 250],
         "badge": 1,
     }
