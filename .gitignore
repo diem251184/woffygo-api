@@ -35,3 +35,5 @@ htmlcov/
 # === Sistema ===
 .DS_Store
 Thumbs.db
+# === Temporales del proyecto (nunca subir) ===
+_tmp_*

@@ -17,6 +17,7 @@ class MessageResponse(BaseModel):
     was_blocked: bool
     block_reason: str | None
     created_at: datetime
+    read_at: datetime | None
 
 
 class MessageAdminResponse(MessageResponse):

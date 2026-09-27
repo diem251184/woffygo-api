@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
@@ -116,3 +118,33 @@ def list_messages(
         .limit(limit)
         .all()
     )
+
+
+@router.post("/read", response_model=dict, status_code=status.HTTP_200_OK)
+def mark_messages_as_read(
+    walk_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """
+    Marca como leidos todos los mensajes del paseo que NO son del usuario actual
+    y que todavia no tienen read_at. Se llama al abrir el chat y en cada poll.
+    Devuelve cuantos mensajes se marcaron.
+    """
+    walk = _get_walk_or_404(db, walk_id)
+    _ensure_participant(walk, current_user)
+
+    now = datetime.now(timezone.utc)
+
+    updated = (
+        db.query(Message)
+        .filter(
+            Message.walk_id == walk.id,
+            Message.sender_id != current_user.id,
+            Message.read_at.is_(None),
+        )
+        .update({Message.read_at: now}, synchronize_session=False)
+    )
+    db.commit()
+
+    return {"marked_read": int(updated)}

@@ -41,5 +41,10 @@ class Message(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
 
+    # Momento en que el receptor leyo el mensaje (null = no leido)
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+
     walk = relationship("Walk")
     sender = relationship("User", foreign_keys=[sender_id])
