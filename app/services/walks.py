@@ -454,7 +454,7 @@ def _notify_nearby_walkers_new_walk(db: Session, walk: Walk, pets: list) -> None
           AND ST_DWithin(
               wp.current_location,
               (SELECT pickup_location FROM walks WHERE id = :walk_id),
-              10000
+              wp.search_radius_km * 1000
           )
         """
     )
