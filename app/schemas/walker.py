@@ -9,7 +9,7 @@ from app.core.config import settings
 class WalkerProfileCreate(BaseModel):
     bio: str | None = Field(default=None, max_length=500)
     hourly_rate: Decimal = Field(default=Decimal("0"), ge=0)
-    search_radius_km: int = Field(default=5, ge=1, le=50)
+    search_radius_km: int = Field(default=5, ge=1, le=5)
 
     @field_validator("hourly_rate")
     @classmethod
@@ -28,7 +28,7 @@ class WalkerProfileCreate(BaseModel):
 class WalkerProfileUpdate(BaseModel):
     bio: str | None = Field(default=None, max_length=500)
     hourly_rate: Decimal | None = Field(default=None, ge=0)
-    search_radius_km: int | None = Field(default=None, ge=1, le=50)
+    search_radius_km: int | None = Field(default=None, ge=1, le=5)
 
     @field_validator("hourly_rate")
     @classmethod
