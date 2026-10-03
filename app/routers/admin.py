@@ -8,6 +8,8 @@ from app.models.walk import Walk
 from app.schemas.admin import FlagClearRequest, WalkVerificationDetail
 from app.schemas.walk import WalkResponse
 from app.services.verification import get_verification_summary
+from app.models.payment import Payment, PaymentStatus
+from app.schemas.payment import PaymentResponse
 
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -81,3 +83,17 @@ def clear_walk_flag(
     db.commit()
     db.refresh(walk)
     return walk
+
+
+@router.get("/payments/disputed", response_model=list[PaymentResponse])
+def list_disputed_payments(
+    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """Lista los pagos con disputa abierta, mas recientes primero."""
+    return (
+        db.query(Payment)
+        .filter(Payment.status == PaymentStatus.DISPUTED)
+        .order_by(Payment.dispute_opened_at.desc().nullslast(), Payment.created_at.desc())
+        .all()
+    )
