@@ -9,6 +9,10 @@ from app.schemas.admin import FlagClearRequest, WalkVerificationDetail
 from app.schemas.walk import WalkResponse
 from app.services.verification import get_verification_summary
 from app.models.payment import Payment, PaymentStatus
+from app.models.admin_action import AdminAction
+from app.schemas.admin_action import AdminActionResponse, AdminStats
+from app.services.admin_log import log_action
+from sqlalchemy import func as sqlfunc, text
 from app.schemas.payment import PaymentResponse
 from app.schemas.admin import AdminUserListItem, AdminUserDetail, AdminWalkerProfileInfo, ToggleActiveRequest
 from app.models.pet import Pet
@@ -85,6 +89,15 @@ def clear_walk_flag(
         walk.flag_reason = f"[REVISADO POR ADMIN] {payload.note}"[:500]
     db.commit()
     db.refresh(walk)
+
+    try:
+        log_action(
+            db, current_user, "flag_clear", "walk", walk.id,
+            f"Limpio flag del paseo #{walk.id}" + (f": {payload.note}" if payload.note else ""),
+        )
+    except Exception as _e:
+        print(f"[admin_log] Error logueando flag_clear: {_e}")
+
     return walk
 
 
@@ -234,5 +247,131 @@ def toggle_user_active(
     db.commit()
     db.refresh(user)
 
+    accion_str = "Desbloqueo" if payload.is_active else "Bloqueo"
+    try:
+        log_action(
+            db, current_user,
+            "user_unblock" if payload.is_active else "user_block",
+            "user", user.id,
+            f"{accion_str} a {user.email} ({user.full_name})",
+        )
+    except Exception as _e:
+        print(f"[admin_log] Error logueando toggle_active: {_e}")
+
     # Devolvemos el detalle actualizado
     return get_user_detail(user.id, current_user, db)
+
+# ============================================
+# Estadisticas y auditoria
+# ============================================
+
+
+@router.get("/stats", response_model=AdminStats)
+def get_admin_stats(
+    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """Contadores agregados para el dashboard del panel admin."""
+    from datetime import datetime, timedelta, timezone
+    from decimal import Decimal
+
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    # Usuarios
+    users_total = db.query(User).count()
+    users_active = db.query(User).filter(User.is_active.is_(True)).count()
+    users_owners = db.query(User).filter(User.role == UserRole.OWNER).count()
+    users_walkers = db.query(User).filter(User.role == UserRole.WALKER).count()
+    users_admins = db.query(User).filter(User.role == UserRole.ADMIN).count()
+
+    # Walkers online
+    walkers_online_now = 0
+    try:
+        from app.models.walker_profile import WalkerProfile
+        walkers_online_now = (
+            db.query(WalkerProfile)
+            .filter(WalkerProfile.is_online.is_(True))
+            .count()
+        )
+    except Exception:
+        pass
+
+    # Paseos
+    walks_total = db.query(Walk).count()
+    walks_pending = db.query(Walk).filter(Walk.status == WalkStatus.PENDING).count()
+    walks_accepted = db.query(Walk).filter(Walk.status == WalkStatus.ACCEPTED).count()
+    walks_in_progress = db.query(Walk).filter(Walk.status == WalkStatus.IN_PROGRESS).count()
+    walks_completed = db.query(Walk).filter(Walk.status == WalkStatus.COMPLETED).count()
+    walks_cancelled = db.query(Walk).filter(Walk.status == WalkStatus.CANCELLED).count()
+    walks_today = db.query(Walk).filter(Walk.created_at >= today_start).count()
+    walks_this_month = db.query(Walk).filter(Walk.created_at >= month_start).count()
+
+    # Dinero
+    revenue_total = db.query(sqlfunc.coalesce(sqlfunc.sum(Payment.platform_fee), 0)).filter(
+        Payment.status == PaymentStatus.RELEASED
+    ).scalar() or Decimal("0")
+
+    revenue_this_month = db.query(sqlfunc.coalesce(sqlfunc.sum(Payment.platform_fee), 0)).filter(
+        Payment.status == PaymentStatus.RELEASED,
+        Payment.released_at >= month_start,
+    ).scalar() or Decimal("0")
+
+    escrow_pending_total = db.query(sqlfunc.coalesce(sqlfunc.sum(Payment.amount), 0)).filter(
+        Payment.status == PaymentStatus.APPROVED,
+        Payment.payment_release_deadline.isnot(None),
+    ).scalar() or Decimal("0")
+
+    disputed_total = db.query(sqlfunc.coalesce(sqlfunc.sum(Payment.amount), 0)).filter(
+        Payment.status == PaymentStatus.DISPUTED
+    ).scalar() or Decimal("0")
+
+    # Moderacion
+    flagged_walks = db.query(Walk).filter(Walk.flagged_for_review.is_(True)).count()
+    disputed_payments = db.query(Payment).filter(
+        Payment.status == PaymentStatus.DISPUTED
+    ).count()
+
+    return AdminStats(
+        users_total=users_total,
+        users_active=users_active,
+        users_owners=users_owners,
+        users_walkers=users_walkers,
+        users_admins=users_admins,
+        walkers_online_now=walkers_online_now,
+        walks_total=walks_total,
+        walks_pending=walks_pending,
+        walks_accepted=walks_accepted,
+        walks_in_progress=walks_in_progress,
+        walks_completed=walks_completed,
+        walks_cancelled=walks_cancelled,
+        walks_today=walks_today,
+        walks_this_month=walks_this_month,
+        revenue_total=str(revenue_total),
+        revenue_this_month=str(revenue_this_month),
+        escrow_pending_total=str(escrow_pending_total),
+        disputed_total=str(disputed_total),
+        flagged_walks=flagged_walks,
+        disputed_payments=disputed_payments,
+    )
+
+
+@router.get("/actions", response_model=list[AdminActionResponse])
+def list_admin_actions(
+    limit: int = 100,
+    offset: int = 0,
+    action: str | None = None,
+    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """Historial de acciones administrativas, mas recientes primero."""
+    query = db.query(AdminAction)
+    if action:
+        query = query.filter(AdminAction.action == action)
+    return (
+        query.order_by(AdminAction.created_at.desc())
+        .limit(min(limit, 200))
+        .offset(offset)
+        .all()
+    )

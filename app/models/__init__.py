@@ -8,6 +8,7 @@ from app.models.payment import Payment, PaymentStatus
 from app.models.message import Message
 from app.models.review import Review
 from app.models.device_token import DeviceToken
+from app.models.admin_action import AdminAction
 from app.models.password_reset_token import PasswordResetToken
 
 __all__ = [

@@ -100,13 +100,27 @@ def admin_resolve_payment(
     current_user: User = Depends(require_role(UserRole.ADMIN)),
     db: Session = Depends(get_db),
 ) -> Payment:
-    return resolve_dispute(
+    payment = resolve_dispute(
         db,
         payment_id,
         current_user,
         payload.release_to_walker,
         payload.resolution_note,
     )
+
+    # Log de auditoria
+    try:
+        from app.services.admin_log import log_action
+        accion_str = "libero al walker" if payload.release_to_walker else "reembolso al owner"
+        log_action(
+            db, current_user, "dispute_resolve", "payment", payment.id,
+            f"Resolvio disputa del pago #{payment.id} ({accion_str})"
+            + (f": {payload.resolution_note}" if payload.resolution_note else ""),
+        )
+    except Exception as _e:
+        print(f"[admin_log] Error logueando dispute_resolve: {_e}")
+
+    return payment
 
 
 @router.post("/admin/release-expired")
