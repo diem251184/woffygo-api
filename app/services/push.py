@@ -84,14 +84,14 @@ def _send_batch(messages: list[dict]) -> list[dict]:
 
 def _build_message(token: str, title: str, body: str, data: dict | None = None) -> dict:
     # Data-only push: el titulo/cuerpo y el channelId van dentro de data.
-    # El cliente los reconstruye con TaskManager para forzar el canal walks-v5.
+    # El cliente los reconstruye con TaskManager para forzar el canal walks-v6.
     msg = {
         "to": token,
         "priority": "high",
         "data": {
             "title": title,
             "body": body,
-            "channelId": "walks-v5",
+            "channelId": "walks-v6",
             "_contentAvailable": True,
         },
     }
