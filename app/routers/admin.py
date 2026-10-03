@@ -12,6 +12,8 @@ from app.models.payment import Payment, PaymentStatus
 from app.models.admin_action import AdminAction
 from app.schemas.admin_action import AdminActionResponse, AdminStats
 from app.services.admin_log import log_action
+from app.models.safety_report import SafetyReport
+from app.schemas.safety_report import SafetyReportAdminResponse, SafetyReportDeleteRequest
 from sqlalchemy import func as sqlfunc, text
 from app.schemas.payment import PaymentResponse
 from app.schemas.admin import AdminUserListItem, AdminUserDetail, AdminWalkerProfileInfo, ToggleActiveRequest
@@ -375,3 +377,111 @@ def list_admin_actions(
         .offset(offset)
         .all()
     )
+
+# ============================================
+# Reportes de seguridad
+# ============================================
+
+
+@router.get("/safety-reports", response_model=list[SafetyReportAdminResponse])
+def list_safety_reports(
+    include_deleted: bool = False,
+    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """Lista reportes de seguridad. Por defecto solo los activos."""
+    q = db.query(SafetyReport)
+    if not include_deleted:
+        q = q.filter(SafetyReport.deleted.is_(False))
+    rows = q.order_by(SafetyReport.created_at.desc()).limit(200).all()
+
+    out = []
+    for r in rows:
+        reporter_name = "Usuario"
+        try:
+            u = db.get(User, r.reporter_id)
+            if u is not None:
+                reporter_name = u.full_name
+        except Exception:
+            pass
+        out.append(SafetyReportAdminResponse(
+            id=r.id,
+            category=r.category,
+            description=r.description,
+            latitude=r.latitude,
+            longitude=r.longitude,
+            verified=r.verified,
+            created_at=r.created_at,
+            expires_at=r.expires_at,
+            reporter_id=r.reporter_id,
+            reporter_name=reporter_name,
+            reporter_role=r.reporter_role,
+            walk_id=r.walk_id,
+            deleted=r.deleted,
+            deleted_reason=r.deleted_reason,
+        ))
+    return out
+
+
+@router.post("/safety-reports/{report_id}/verify", response_model=SafetyReportAdminResponse)
+def verify_safety_report(
+    report_id: int,
+    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """Marca un reporte como verificado (util para destacar reportes validos)."""
+    r = db.get(SafetyReport, report_id)
+    if r is None or r.deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reporte no encontrado")
+
+    r.verified = True
+    db.commit()
+    db.refresh(r)
+
+    try:
+        log_action(db, current_user, "safety_verify", "safety_report", r.id,
+                   f"Verifico el reporte #{r.id} ({r.category.value})")
+    except Exception as _e:
+        print(f"[admin_log] Error logueando safety_verify: {_e}")
+
+    reporter_name = "Usuario"
+    try:
+        u = db.get(User, r.reporter_id)
+        if u is not None:
+            reporter_name = u.full_name
+    except Exception:
+        pass
+
+    return SafetyReportAdminResponse(
+        id=r.id, category=r.category, description=r.description,
+        latitude=r.latitude, longitude=r.longitude, verified=r.verified,
+        created_at=r.created_at, expires_at=r.expires_at,
+        reporter_id=r.reporter_id, reporter_name=reporter_name,
+        reporter_role=r.reporter_role, walk_id=r.walk_id,
+        deleted=r.deleted, deleted_reason=r.deleted_reason,
+    )
+
+
+@router.delete("/safety-reports/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_safety_report(
+    report_id: int,
+    payload: SafetyReportDeleteRequest = None,
+    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """Elimina (soft delete) un reporte de seguridad."""
+    r = db.get(SafetyReport, report_id)
+    if r is None or r.deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reporte no encontrado")
+
+    r.deleted = True
+    r.deleted_reason = (payload.reason if payload and payload.reason else "Eliminado por admin")[:300]
+    db.commit()
+
+    try:
+        log_action(db, current_user, "safety_delete", "safety_report", r.id,
+                   f"Elimino el reporte #{r.id} ({r.category.value}): {r.deleted_reason}")
+    except Exception as _e:
+        print(f"[admin_log] Error logueando safety_delete: {_e}")
+
+    return None
