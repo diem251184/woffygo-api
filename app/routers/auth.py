@@ -116,7 +116,20 @@ def register_device_token(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Registra o actualiza el token de push del dispositivo actual."""
+    """Registra o actualiza el token de push del dispositivo actual.
+
+    Estrategia single-device: al recibir un token nuevo, desactiva los
+    tokens viejos del mismo usuario. Evita acumular tokens muertos y
+    enviar push a dispositivos que ya no usan la app.
+    """
+    # Desactivar todos los tokens activos del user que NO sean el nuevo
+    db.query(DeviceToken).filter(
+        DeviceToken.user_id == current_user.id,
+        DeviceToken.token != payload.token,
+        DeviceToken.is_active.is_(True),
+    ).update({"is_active": False}, synchronize_session=False)
+
+    # Registrar o reactivar el token actual
     existing = (
         db.query(DeviceToken)
         .filter(DeviceToken.token == payload.token)
