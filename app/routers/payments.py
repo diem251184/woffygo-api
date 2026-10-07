@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_role
+from app.core.deps import get_current_user, require_admin_or_cron, require_role
 from app.models.payment import Payment, PaymentStatus
 from app.models.user import User, UserRole
 from app.models.walk import Walk
@@ -125,7 +125,7 @@ def admin_resolve_payment(
 
 @router.post("/admin/release-expired")
 def admin_release_expired(
-    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    current_user: User | None = Depends(require_admin_or_cron),
     db: Session = Depends(get_db),
 ) -> dict:
     ids = release_expired_payments(db)

@@ -1,7 +1,10 @@
-from fastapi import Depends, HTTPException, status
+import hmac
+
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import decode_access_token
 from app.models.user import User, UserRole
@@ -67,3 +70,33 @@ def require_role(*allowed: UserRole):
             )
         return current_user
     return checker
+
+
+def require_admin_or_cron(
+    x_cron_secret: str | None = Header(default=None, alias="X-Cron-Secret"),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> User | None:
+    """Permite el acceso de dos maneras:
+
+    1) Cron externo: manda el header X-Cron-Secret con el valor de CRON_SECRET.
+       En este caso devuelve None (no hay usuario humano detras).
+    2) Admin logueado: manda Bearer token con rol admin.
+
+    Si CRON_SECRET esta vacio en el entorno, la via cron queda deshabilitada
+    y solo funciona la via admin.
+    """
+    if (
+        x_cron_secret is not None
+        and settings.CRON_SECRET
+        and hmac.compare_digest(x_cron_secret, settings.CRON_SECRET)
+    ):
+        return None
+
+    user = get_current_user(credentials=credentials, db=db)
+    if user.role != UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tenes permisos para esta accion",
+        )
+    return user

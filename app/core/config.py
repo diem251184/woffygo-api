@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     FRONTEND_RESET_URL: str = "woffygo://reset-password"
     PASSWORD_RESET_TOKEN_MINUTES: int = 30
 
+    # Secreto compartido para que un cron externo pueda pegarle a endpoints
+    # internos (ej: /payments/admin/release-expired) sin necesidad de loguearse
+    # como admin. Si queda vacio, la via cron queda deshabilitada.
+    CRON_SECRET: str = ""
+
     @field_validator("MAX_HOURLY_RATE")
     @classmethod
     def max_must_be_greater_than_min(cls, v: Decimal, info) -> Decimal:
