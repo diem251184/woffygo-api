@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     # como admin. Si queda vacio, la via cron queda deshabilitada.
     CRON_SECRET: str = ""
 
+    # Info de version de la app movil (para el cartel de "nueva version")
+    # Cada vez que publiques una APK nueva, actualiza LATEST_APP_VERSION aca
+    # en Render y la app avisa a los usuarios que hay actualizacion disponible.
+    LATEST_APP_VERSION: str = "1.0.0"
+    MIN_SUPPORTED_APP_VERSION: str = "1.0.0"
+    APP_DOWNLOAD_URL: str = "https://woffygo-api.onrender.com/descargar"
+    APP_RELEASE_NOTES: str = ""
+
     @field_validator("MAX_HOURLY_RATE")
     @classmethod
     def max_must_be_greater_than_min(cls, v: Decimal, info) -> Decimal:

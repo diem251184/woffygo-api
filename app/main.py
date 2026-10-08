@@ -1,7 +1,7 @@
-﻿from fastapi import FastAPI
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import admin, auth, messages, pets, reviews, walkers, walks, payments, safety_reports
+from app.routers import admin, app_info, auth, messages, pets, reviews, walkers, walks, payments, safety_reports
 
 
 app = FastAPI(
@@ -27,6 +27,7 @@ app.include_router(payments.router)
 app.include_router(admin.router)
 app.include_router(reviews.router)
 app.include_router(safety_reports.router)
+app.include_router(app_info.router)
 
 
 @app.get("/health", tags=["health"])
