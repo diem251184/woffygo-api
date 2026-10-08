@@ -7,6 +7,7 @@ from sqlalchemy import text
 from geoalchemy2.elements import WKTElement
 from sqlalchemy.orm import Session
 
+from app.models.payment import Payment, PaymentStatus
 from app.models.pet import Pet
 from app.models.user import User, UserRole
 from app.models.walk import Walk, WalkStatus
@@ -221,6 +222,23 @@ def start_walk(db: Session, walker_user: User, walk_id: int) -> Walk:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Solo se pueden iniciar paseos aceptados. Estado actual: {walk.status.value}",
+        )
+
+    # Regla de negocio: el paseo debe estar pagado y aprobado antes de iniciar.
+    # Esto evita que el paseador trabaje gratis si el duenio no pago.
+    payment = db.query(Payment).filter(Payment.walk_id == walk.id).first()
+    if payment is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El paseo no tiene pago iniciado. El duenio debe pagar antes de empezar.",
+        )
+    if payment.status != PaymentStatus.APPROVED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"El pago no esta aprobado (estado: {payment.status.value}). "
+                "Espera a que el duenio complete el pago para iniciar el paseo."
+            ),
         )
 
     walk.status = WalkStatus.IN_PROGRESS
@@ -472,4 +490,3 @@ def _notify_nearby_walkers_new_walk(db: Session, walk: Walk, pets: list) -> None
         f"{pets_str} \u00b7 {walk.duration_minutes} min\n{walk.pickup_address}",
         {"type": "new_walk", "walk_id": walk.id},
     )
-
