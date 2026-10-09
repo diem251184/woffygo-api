@@ -1,5 +1,4 @@
-from datetime import datetime
-
+﻿from datetime import datetime, date
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
 
 from app.models.user import UserRole
@@ -9,6 +8,10 @@ class UserBase(BaseModel):
     email: EmailStr
     full_name: str = Field(min_length=2, max_length=120)
     phone: str = Field(min_length=6, max_length=30)
+    dni_number: str | None = None
+    address: str | None = None
+    birth_date: date | None = None
+    emergency_contact: str | None = None
 
 
 class UserCreate(UserBase):
@@ -33,6 +36,10 @@ class UserResponse(UserBase):
 class UserUpdate(BaseModel):
     full_name: str | None = Field(default=None, min_length=2, max_length=120)
     phone: str | None = Field(default=None, min_length=6, max_length=30)
+    dni_number: str | None = None
+    address: str | None = None
+    birth_date: date | None = None
+    emergency_contact: str | None = None
 
 
 class Token(BaseModel):

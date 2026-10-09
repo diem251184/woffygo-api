@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+﻿from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse
@@ -56,6 +56,10 @@ def register(payload: UserCreate, db: Session = Depends(get_db)) -> User:
         full_name=payload.full_name,
         phone=payload.phone,
         role=payload.role,
+        dni_number=payload.dni_number,
+        address=payload.address,
+        birth_date=payload.birth_date,
+        emergency_contact=payload.emergency_contact,
     )
     db.add(user)
     db.commit()
@@ -96,6 +100,15 @@ def update_me(
         current_user.full_name = payload.full_name
     if payload.phone is not None:
         current_user.phone = payload.phone
+    if payload.dni_number is not None:
+        current_user.dni_number = payload.dni_number
+    if payload.address is not None:
+        current_user.address = payload.address
+    if payload.birth_date is not None:
+        current_user.birth_date = payload.birth_date
+    if payload.emergency_contact is not None:
+        current_user.emergency_contact = payload.emergency_contact
+
     db.commit()
     db.refresh(current_user)
     return current_user
@@ -116,20 +129,12 @@ def register_device_token(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Registra o actualiza el token de push del dispositivo actual.
-
-    Estrategia single-device: al recibir un token nuevo, desactiva los
-    tokens viejos del mismo usuario. Evita acumular tokens muertos y
-    enviar push a dispositivos que ya no usan la app.
-    """
-    # Desactivar todos los tokens activos del user que NO sean el nuevo
     db.query(DeviceToken).filter(
         DeviceToken.user_id == current_user.id,
         DeviceToken.token != payload.token,
         DeviceToken.is_active.is_(True),
     ).update({"is_active": False}, synchronize_session=False)
 
-    # Registrar o reactivar el token actual
     existing = (
         db.query(DeviceToken)
         .filter(DeviceToken.token == payload.token)
@@ -154,16 +159,9 @@ def forgot_password(
     payload: ForgotPasswordRequest,
     db: Session = Depends(get_db),
 ) -> PasswordResetResponse:
-    """Solicita el reset de contrasena.
-
-    Por seguridad SIEMPRE devuelve 200 (no revela si el email existe o no).
-    Si el email existe, invalida tokens previos no usados, genera uno nuevo
-    y envia un email con el link de reset.
-    """
     user = db.query(User).filter(User.email == payload.email).first()
 
     if user is not None and user.is_active:
-        # Invalidar tokens previos no usados (por si pidio varias veces)
         now = datetime.now(timezone.utc)
         (
             db.query(PasswordResetToken)
@@ -172,7 +170,6 @@ def forgot_password(
             .update({PasswordResetToken.used_at: now}, synchronize_session=False)
         )
 
-        # Generar token nuevo
         raw_token = generate_reset_token()
         token_hash = hash_reset_token(raw_token)
         expires_at = now + timedelta(minutes=settings.PASSWORD_RESET_TOKEN_MINUTES)
@@ -184,7 +181,6 @@ def forgot_password(
         ))
         db.commit()
 
-        # Enviar email (no rompemos la request si falla el envio)
         email_service.send_password_reset_email(
             to=user.email,
             full_name=user.full_name,
@@ -201,7 +197,6 @@ def reset_password(
     payload: ResetPasswordRequest,
     db: Session = Depends(get_db),
 ) -> PasswordResetResponse:
-    """Aplica el reset de contrasena con el token recibido por email."""
     token_hash = hash_reset_token(payload.token)
 
     row = (
@@ -218,7 +213,6 @@ def reset_password(
 
     now = datetime.now(timezone.utc)
 
-    # Asegurar comparacion de datetimes timezone-aware
     expires_at = row.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
@@ -242,7 +236,6 @@ def reset_password(
             detail="Usuario no encontrado",
         )
 
-    # Actualizar password y marcar token como usado
     user.password_hash = hash_password(payload.new_password)
     row.used_at = now
     db.commit()
@@ -251,10 +244,6 @@ def reset_password(
         message="Contrasena actualizada. Ya podes iniciar sesion con la nueva."
     )
 
-# ---------------------------------------------------------------
-# Reset redirect: pagina intermedia que convierte un link https
-# en un deep link woffygo:// para que Gmail / navegadores lo acepten.
-# ---------------------------------------------------------------
 
 def _redirect_html(deep_link: str) -> str:
     return f"""<!DOCTYPE html>
@@ -331,9 +320,7 @@ def _redirect_html(deep_link: str) -> str:
     <p class="hint">Si no se abre sola, toc&aacute; el bot&oacute;n de arriba.</p>
   </div>
   <script>
-    // Intento 1: abrir el deep link automaticamente
     window.location.href = "{deep_link}";
-    // Intento 2: por si el navegador bloquea el primero
     setTimeout(function() {{
       window.location.href = "{deep_link}";
     }}, 300);
@@ -374,12 +361,6 @@ def _invalid_link_html() -> str:
 
 @router.get("/reset-redirect", response_class=HTMLResponse, include_in_schema=False)
 def reset_redirect(token: str = "") -> HTMLResponse:
-    """Pagina intermedia que convierte un link https en un deep link woffygo://.
-
-    Necesario porque Gmail y los navegadores bloquean links con schemes custom.
-    El usuario toca un link https normal, el backend devuelve un HTML que
-    intenta abrir la app via el deep link woffygo://reset-password.
-    """
     if not token or len(token) < 10:
         return HTMLResponse(content=_invalid_link_html(), status_code=400)
 
