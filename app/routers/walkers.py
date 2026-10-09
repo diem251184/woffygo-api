@@ -5,7 +5,7 @@ from app.core.database import get_db
 from app.core.deps import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.models.walker_profile import WalkerProfile
-from app.models.walker_verification import WalkerVerification, VerificationStatus
+from app.models.walker_verification import WalkerVerification, WalkerVerificationStatus
 from app.schemas.walker import (
     WalkerLocationUpdate,
     WalkerNearbyResult,
@@ -108,7 +108,7 @@ def toggle_online(
 ) -> WalkerProfile:
     profile = _get_or_404_profile(db, current_user)
 
-    # Candado de seguridad: solo paseadores con identidad verificada y aprobada pueden ponerse ONLINE
+    # Bloqueo de seguridad: solo paseadores con KYC aprobado pueden ponerse online
     if payload.is_online:
         verification = (
             db.query(WalkerVerification)
@@ -116,7 +116,7 @@ def toggle_online(
             .order_by(WalkerVerification.id.desc())
             .first()
         )
-        if not verification or verification.status != VerificationStatus.APPROVED:
+        if not verification or verification.status != WalkerVerificationStatus.APPROVED:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Tu cuenta no está verificada por un administrador. Completá la verificación de identidad (KYC) para recibir paseos.",
