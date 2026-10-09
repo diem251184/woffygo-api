@@ -1,4 +1,4 @@
-"""Servicio de envio de notificaciones push via Expo Push API.
+﻿"""Servicio de envio de notificaciones push via Expo Push API.
 
 Expo Push API:
 - Endpoint: https://exp.host/--/api/v2/push/send
@@ -9,6 +9,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.models.device_token import DeviceToken
+from app.models.user import User, UserRole
 
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
@@ -57,7 +58,6 @@ def _send_batch(messages: list[dict]) -> list[dict]:
         return []
     import json as _json
     print(f"[push] Payload a enviar: {_json.dumps(messages)}")
-    # Expo espera objeto si es 1 solo mensaje, array si son 2+
     payload = messages[0] if len(messages) == 1 else messages
     try:
         with httpx.Client(timeout=15.0) as client:
@@ -83,8 +83,6 @@ def _send_batch(messages: list[dict]) -> list[dict]:
 
 
 def _build_message(token: str, title: str, body: str, data: dict | None = None) -> dict:
-    # Data-only push: el titulo/cuerpo y el channelId van dentro de data.
-    # El cliente los reconstruye con TaskManager para forzar el canal walks-v6.
     msg = {
         "to": token,
         "priority": "high",
@@ -136,7 +134,6 @@ def send_to_users(
             all_messages.append(_build_message(t, title, body, data))
     if not all_messages:
         return 0
-    # Enviar en batches de 100
     total_sent = 0
     for i in range(0, len(all_messages), 100):
         chunk_msgs = all_messages[i:i+100]
@@ -145,6 +142,20 @@ def send_to_users(
         _handle_results(db, chunk_tokens, results)
         total_sent += len(chunk_msgs)
     return total_sent
+
+
+def send_to_admins(
+    db: Session,
+    title: str,
+    body: str,
+    data: dict | None = None,
+) -> int:
+    """Envia una notificacion push a todos los administradores activos del sistema."""
+    admin_users = db.query(User.id).filter(User.role == UserRole.ADMIN, User.is_active.is_(True)).all()
+    admin_ids = [u[0] for u in admin_users]
+    if not admin_ids:
+        return 0
+    return send_to_users(db, admin_ids, title, body, data)
 
 
 def _handle_results(db: Session, tokens: list[str], results: list[dict]) -> None:

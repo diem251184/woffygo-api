@@ -1,5 +1,4 @@
 ﻿from datetime import datetime
-
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -16,6 +15,11 @@ class WalkerVerificationOut(BaseModel):
     reviewed_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+    # Datos complementarios del paseador para la vista de Admin
+    user_full_name: str | None = None
+    user_email: str | None = None
+    user_phone: str | None = None
 
 
 class WalkerVerificationStatusOut(BaseModel):
