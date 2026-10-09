@@ -21,6 +21,18 @@ from app.services import admin_log, cloudinary_service, email, push
 router = APIRouter(prefix="/walker-verifications", tags=["walker-verifications"])
 
 
+def _fill_user_data(out: WalkerVerificationOut, u: User | None) -> WalkerVerificationOut:
+    if u:
+        out.user_full_name = u.full_name
+        out.user_email = u.email
+        out.user_phone = u.phone
+        out.user_dni_number = u.dni_number
+        out.user_address = u.address
+        out.user_birth_date = u.birth_date
+        out.user_emergency_contact = u.emergency_contact
+    return out
+
+
 @router.post(
     "/upload",
     response_model=WalkerVerificationOut,
@@ -83,7 +95,6 @@ async def upload_verification(
     db.commit()
     db.refresh(verification)
 
-    # Notificar a los administradores vía Push Notification
     try:
         push.send_to_admins(
             db=db,
@@ -95,10 +106,7 @@ async def upload_verification(
         print(f"[kyc] Error enviando push a admins: {e}")
 
     out = WalkerVerificationOut.model_validate(verification)
-    out.user_full_name = current_user.full_name
-    out.user_email = current_user.email
-    out.user_phone = current_user.phone
-    return out
+    return _fill_user_data(out, current_user)
 
 
 @router.get("/me", response_model=WalkerVerificationStatusOut)
@@ -142,10 +150,7 @@ def list_pending(
     items = []
     for verif, u in results:
         out = WalkerVerificationOut.model_validate(verif)
-        out.user_full_name = u.full_name
-        out.user_email = u.email
-        out.user_phone = u.phone
-        items.append(out)
+        items.append(_fill_user_data(out, u))
 
     return items
 
@@ -174,7 +179,6 @@ def approve_verification(
 
     target_user = db.get(User, v.user_id)
 
-    # Registrar acción en Audit Log
     try:
         user_info = target_user.full_name if target_user else f"ID {v.user_id}"
         admin_log.log_action(
@@ -189,7 +193,6 @@ def approve_verification(
         print(f"[kyc] Error registrando audit log: {e}")
 
     if target_user:
-        # Push al Paseador
         try:
             push.send_to_user(
                 db=db,
@@ -201,7 +204,6 @@ def approve_verification(
         except Exception as e:
             print(f"[kyc] Error enviando push: {e}")
 
-        # Email por Resend
         try:
             email.send_email(
                 to_email=target_user.email,
@@ -217,11 +219,7 @@ def approve_verification(
             print(f"[kyc] Error enviando email: {e}")
 
     out = WalkerVerificationOut.model_validate(v)
-    if target_user:
-        out.user_full_name = target_user.full_name
-        out.user_email = target_user.email
-        out.user_phone = target_user.phone
-    return out
+    return _fill_user_data(out, target_user)
 
 
 @router.post(
@@ -247,7 +245,6 @@ def reject_verification(
 
     target_user = db.get(User, v.user_id)
 
-    # Registrar acción en Audit Log
     try:
         user_info = target_user.full_name if target_user else f"ID {v.user_id}"
         admin_log.log_action(
@@ -262,7 +259,6 @@ def reject_verification(
         print(f"[kyc] Error registrando audit log: {e}")
 
     if target_user:
-        # Push al Paseador
         try:
             push.send_to_user(
                 db=db,
@@ -274,7 +270,6 @@ def reject_verification(
         except Exception as e:
             print(f"[kyc] Error enviando push: {e}")
 
-        # Email por Resend
         try:
             email.send_email(
                 to_email=target_user.email,
@@ -291,8 +286,4 @@ def reject_verification(
             print(f"[kyc] Error enviando email: {e}")
 
     out = WalkerVerificationOut.model_validate(v)
-    if target_user:
-        out.user_full_name = target_user.full_name
-        out.user_email = target_user.email
-        out.user_phone = target_user.phone
-    return out
+    return _fill_user_data(out, target_user)

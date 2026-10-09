@@ -1,5 +1,5 @@
-from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, Enum as SAEnum, func
+﻿from datetime import datetime, date
+from sqlalchemy import String, Boolean, DateTime, Date, Enum as SAEnum, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 import enum
 
@@ -24,6 +24,13 @@ class User(Base):
         SAEnum(UserRole, name="user_role", values_callable=lambda x: [e.value for e in x]),
         nullable=False,
     )
+    
+    # Campos de perfil extendido (Seguridad/KYC estilo Uber)
+    dni_number: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    address: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    birth_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    emergency_contact: Mapped[str | None] = mapped_column(String(150), nullable=True)
+
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
