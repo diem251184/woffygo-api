@@ -1,4 +1,4 @@
-﻿from decimal import Decimal
+from decimal import Decimal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,11 +21,6 @@ class Settings(BaseSettings):
     MERCADOPAGO_PUBLIC_KEY: str = ""
     MERCADOPAGO_WEBHOOK_SECRET: str = ""
 
-    # Cloudinary (KYC de walkers)
-    CLOUDINARY_CLOUD_NAME: str = ""
-    CLOUDINARY_API_KEY: str = ""
-    CLOUDINARY_API_SECRET: str = ""
-
     # Rango de tarifas por hora para paseadores
     MIN_HOURLY_RATE: Decimal = Decimal("2500.00")
     MAX_HOURLY_RATE: Decimal = Decimal("3500.00")
@@ -42,14 +37,6 @@ class Settings(BaseSettings):
     # internos (ej: /payments/admin/release-expired) sin necesidad de loguearse
     # como admin. Si queda vacio, la via cron queda deshabilitada.
     CRON_SECRET: str = ""
-
-    # Info de version de la app movil (para el cartel de "nueva version")
-    # Cada vez que publiques una APK nueva, actualiza LATEST_APP_VERSION aca
-    # en Render y la app avisa a los usuarios que hay actualizacion disponible.
-    LATEST_APP_VERSION: str = "1.0.0"
-    MIN_SUPPORTED_APP_VERSION: str = "1.0.0"
-    APP_DOWNLOAD_URL: str = "https://woffygo-api.onrender.com/descargar"
-    APP_RELEASE_NOTES: str = ""
 
     @field_validator("MAX_HOURLY_RATE")
     @classmethod
