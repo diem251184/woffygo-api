@@ -1,6 +1,6 @@
 ﻿from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -15,7 +15,7 @@ from app.schemas.walker_verification import (
     WalkerVerificationOut,
     WalkerVerificationStatusOut,
 )
-from app.services import cloudinary_service, email, push
+from app.services import admin_log, cloudinary_service, email, push
 
 
 router = APIRouter(prefix="/walker-verifications", tags=["walker-verifications"])
@@ -124,16 +124,20 @@ def get_my_verification(
 
 @router.get("/admin/pending", response_model=list[WalkerVerificationOut])
 def list_pending(
+    status_filter: str | None = Query(default="pending"),
     current_user: User = Depends(require_role(UserRole.ADMIN)),
     db: Session = Depends(get_db),
 ):
-    results = (
-        db.query(WalkerVerification, User)
-        .join(User, WalkerVerification.user_id == User.id)
-        .filter(WalkerVerification.status == WalkerVerificationStatus.PENDING)
-        .order_by(WalkerVerification.created_at.asc())
-        .all()
-    )
+    query = db.query(WalkerVerification, User).join(User, WalkerVerification.user_id == User.id)
+
+    if status_filter == "pending":
+        query = query.filter(WalkerVerification.status == WalkerVerificationStatus.PENDING)
+    elif status_filter == "approved":
+        query = query.filter(WalkerVerification.status == WalkerVerificationStatus.APPROVED)
+    elif status_filter == "rejected":
+        query = query.filter(WalkerVerification.status == WalkerVerificationStatus.REJECTED)
+
+    results = query.order_by(WalkerVerification.updated_at.desc()).all()
 
     items = []
     for verif, u in results:
@@ -169,8 +173,23 @@ def approve_verification(
     db.refresh(v)
 
     target_user = db.get(User, v.user_id)
+
+    # Registrar acción en Audit Log
+    try:
+        user_info = target_user.full_name if target_user else f"ID {v.user_id}"
+        admin_log.log_action(
+            db=db,
+            admin=current_user,
+            action="KYC_APPROVE",
+            target_type="WALKER_VERIFICATION",
+            target_id=v.id,
+            description=f"Aprobó la verificación de identidad del paseador {user_info}",
+        )
+    except Exception as e:
+        print(f"[kyc] Error registrando audit log: {e}")
+
     if target_user:
-        # 1. Enviar notificación Push al Paseador
+        # Push al Paseador
         try:
             push.send_to_user(
                 db=db,
@@ -180,23 +199,22 @@ def approve_verification(
                 data={"type": "kyc_approved"},
             )
         except Exception as e:
-            print(f"[kyc] Error enviando push de aprobacion: {e}")
+            print(f"[kyc] Error enviando push: {e}")
 
-        # 2. Enviar Email vía Resend al Paseador
+        # Email por Resend
         try:
             email.send_email(
                 to_email=target_user.email,
                 subject="Woofy Go - ¡Tu cuenta fue verificada!",
                 body=(
                     f"Hola {target_user.full_name},\n\n"
-                    "¡Buenas noticias! Tu documentación de identidad fue revisada y aprobada con éxito por nuestro equipo.\n\n"
-                    "A partir de este momento tenés acceso completo para ponerte online y aceptar paseos en la aplicación.\n\n"
-                    "¡Éxitos con tus paseos!\n"
+                    "¡Buenas noticias! Tu documentación fue revisada y aprobada por nuestro equipo.\n\n"
+                    "A partir de este momento tenés acceso completo para ponerte online y aceptar paseos.\n\n"
                     "El equipo de Woofy Go 🐾"
                 ),
             )
         except Exception as e:
-            print(f"[kyc] Error enviando email de aprobacion: {e}")
+            print(f"[kyc] Error enviando email: {e}")
 
     out = WalkerVerificationOut.model_validate(v)
     if target_user:
@@ -228,8 +246,23 @@ def reject_verification(
     db.refresh(v)
 
     target_user = db.get(User, v.user_id)
+
+    # Registrar acción en Audit Log
+    try:
+        user_info = target_user.full_name if target_user else f"ID {v.user_id}"
+        admin_log.log_action(
+            db=db,
+            admin=current_user,
+            action="KYC_REJECT",
+            target_type="WALKER_VERIFICATION",
+            target_id=v.id,
+            description=f"Rechazó la verificación del paseador {user_info}. Motivo: {body.reason}",
+        )
+    except Exception as e:
+        print(f"[kyc] Error registrando audit log: {e}")
+
     if target_user:
-        # 1. Push al Paseador
+        # Push al Paseador
         try:
             push.send_to_user(
                 db=db,
@@ -239,24 +272,23 @@ def reject_verification(
                 data={"type": "kyc_rejected"},
             )
         except Exception as e:
-            print(f"[kyc] Error enviando push de rechazo: {e}")
+            print(f"[kyc] Error enviando push: {e}")
 
-        # 2. Email al Paseador
+        # Email por Resend
         try:
             email.send_email(
                 to_email=target_user.email,
                 subject="Woofy Go - Actualización sobre tu verificación",
                 body=(
                     f"Hola {target_user.full_name},\n\n"
-                    "Revisamos tu documentación y no pudimos aprobar tu verificación por el siguiente motivo:\n\n"
+                    "No pudimos aprobar tu verificación por el siguiente motivo:\n\n"
                     f"👉 {body.reason}\n\n"
-                    "Por favor, ingresá a la app, revisá los requisitos de las imágenes (que sean nítidas y legibles) y volvé a enviarlas.\n\n"
-                    "Saludos,\n"
+                    "Por favor, volvé a ingresar a la app y subí nuevamente las fotos.\n\n"
                     "El equipo de Woofy Go 🐾"
                 ),
             )
         except Exception as e:
-            print(f"[kyc] Error enviando email de rechazo: {e}")
+            print(f"[kyc] Error enviando email: {e}")
 
     out = WalkerVerificationOut.model_validate(v)
     if target_user:
