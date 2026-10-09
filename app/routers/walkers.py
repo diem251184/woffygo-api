@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+﻿from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.models.walker_profile import WalkerProfile
+from app.models.walker_verification import WalkerVerification, VerificationStatus
 from app.schemas.walker import (
     WalkerLocationUpdate,
     WalkerNearbyResult,
@@ -106,6 +107,21 @@ def toggle_online(
     db: Session = Depends(get_db),
 ) -> WalkerProfile:
     profile = _get_or_404_profile(db, current_user)
+
+    # Candado de seguridad: solo paseadores con identidad verificada y aprobada pueden ponerse ONLINE
+    if payload.is_online:
+        verification = (
+            db.query(WalkerVerification)
+            .filter(WalkerVerification.user_id == current_user.id)
+            .order_by(WalkerVerification.id.desc())
+            .first()
+        )
+        if not verification or verification.status != VerificationStatus.APPROVED:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Tu cuenta no está verificada por un administrador. Completá la verificación de identidad (KYC) para recibir paseos.",
+            )
+
     return set_walker_online(db, profile, payload.is_online)
 
 
