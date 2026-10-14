@@ -15,7 +15,8 @@ from app.schemas.walker_verification import (
     WalkerVerificationOut,
     WalkerVerificationStatusOut,
 )
-from app.services import admin_log, cloudinary_service, email, push
+from app.services import admin_log, email, push
+from app.services.storage import upload_image_to_r2
 
 
 router = APIRouter(prefix="/walker-verifications", tags=["walker-verifications"])
@@ -61,17 +62,23 @@ async def upload_verification(
         back_bytes = await dni_back.read()
         selfie_bytes = await selfie.read()
 
-        front_url = cloudinary_service.upload_kyc_image(
-            front_bytes, dni_front.content_type, current_user.id, "dni_front"
+        front_url = upload_image_to_r2(
+            front_bytes,
+            dni_front.filename or "dni_front.jpg",
+            dni_front.content_type or "image/jpeg",
         )
-        back_url = cloudinary_service.upload_kyc_image(
-            back_bytes, dni_back.content_type, current_user.id, "dni_back"
+        back_url = upload_image_to_r2(
+            back_bytes,
+            dni_back.filename or "dni_back.jpg",
+            dni_back.content_type or "image/jpeg",
         )
-        selfie_url = cloudinary_service.upload_kyc_image(
-            selfie_bytes, selfie.content_type, current_user.id, "selfie"
+        selfie_url = upload_image_to_r2(
+            selfie_bytes,
+            selfie.filename or "selfie.jpg",
+            selfie.content_type or "image/jpeg",
         )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error subiendo archivos a R2: {str(e)}")
 
     if existing:
         existing.dni_front_url = front_url
