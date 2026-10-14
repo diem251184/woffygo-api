@@ -17,3 +17,5 @@ gunicorn==23.0.0
 httpx==0.27.2
 cloudinary
 python-multipart
+
+boto3>=1.34.0
