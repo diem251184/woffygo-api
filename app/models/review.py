@@ -30,9 +30,4 @@ class Review(Base):
 
     reviewer = relationship("User", foreign_keys=[reviewer_id])
     reviewed_user = relationship("User", foreign_keys=[reviewed_user_id])
-    booking = relationship(
-        "Booking",
-        foreign_keys=[walk_id],
-        primaryjoin="Review.walk_id == Booking.id",
-    )
-    walk = booking
+    booking = relationship("Booking", foreign_keys=[walk_id])

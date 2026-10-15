@@ -1,4 +1,4 @@
-﻿from datetime import datetime, timedelta, timezone
+﻿from datetime import datetime, timezone
 from decimal import Decimal
 from fastapi import HTTPException, status
 from geoalchemy2.elements import WKTElement
@@ -8,15 +8,12 @@ from sqlalchemy.orm import Session
 from app.models.booking import Booking, BookingPet, BookingStatus, ServiceType
 from app.models.payment import Payment, PaymentStatus
 from app.models.pet import Pet
-from app.models.provider_service import ProviderService
 from app.models.user import User, UserRole
 from app.models.walker_profile import WalkerProfile
 from app.schemas.booking import BookingCreate
 from app.services import push
 from app.services.escrow import start_escrow_window
-from app.services.verification import verify_walk_integrity
 
-# Matriz estricta de transiciones de estado permitidas
 ALLOWED_TRANSITIONS: dict[BookingStatus, set[BookingStatus]] = {
     BookingStatus.REQUESTED: {BookingStatus.ACCEPTED, BookingStatus.REJECTED, BookingStatus.CANCELLED},
     BookingStatus.ACCEPTED: {BookingStatus.IN_PROGRESS, BookingStatus.CANCELLED},
@@ -105,6 +102,7 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
                 detail=f"La mascota '{pet.name}' no te pertenece",
             )
 
+    now = _now()
     booking = Booking(
         owner_id=owner.id,
         provider_id=None,
@@ -114,9 +112,11 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
         pickup_address=payload.pickup_address,
         duration_minutes=payload.duration_minutes,
         notes=payload.notes,
-        price_total=Decimal("0"),
-        platform_fee=Decimal("0"),
-        provider_earnings=Decimal("0"),
+        price_total=Decimal("0.00"),
+        platform_fee=Decimal("0.00"),
+        provider_earnings=Decimal("0.00"),
+        requested_at=now,
+        flagged_for_review=False,
     )
     db.add(booking)
     db.flush()
@@ -251,6 +251,7 @@ def cancel_booking(db: Session, user: User, booking_id: int, reason: str | None)
     booking.status = BookingStatus.CANCELLED
     booking.cancelled_at = _now()
     booking.cancel_reason = reason
+    booking.cancelled_by_id = user.id
     db.commit()
     db.refresh(booking)
     return booking

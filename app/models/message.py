@@ -1,5 +1,5 @@
 ﻿from datetime import datetime
-from sqlalchemy import String, Text, DateTime, ForeignKey, Boolean, func
+from sqlalchemy import Text, DateTime, ForeignKey, Boolean, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -26,9 +26,4 @@ class Message(Base):
 
     sender = relationship("User", foreign_keys=[sender_id])
     recipient = relationship("User", foreign_keys=[recipient_id])
-    booking = relationship(
-        "Booking",
-        foreign_keys=[walk_id],
-        primaryjoin="Message.walk_id == Booking.id",
-    )
-    walk = booking
+    booking = relationship("Booking", foreign_keys=[walk_id])
