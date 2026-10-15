@@ -71,3 +71,7 @@ class Payment(Base):
     )
 
     booking = relationship("Booking")
+
+    @property
+    def walk_id(self) -> int:
+        return self.booking_id
