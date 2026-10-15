@@ -1,10 +1,14 @@
 ﻿from app.models.booking import Booking, BookingPet, BookingStatus, ServiceType
 
-# Alias de modelos
-Walk = Booking
-WalkPet = BookingPet
+# Herencia directa para que SQLAlchemy registre 'Walk' en su Class Registry
+class Walk(Booking):
+    __tablename__ = None
+    __table__ = Booking.__table__
 
-# Adaptador de enum para soportar tanto nombres viejos como nuevos
+class WalkPet(BookingPet):
+    __tablename__ = None
+    __table__ = BookingPet.__table__
+
 class WalkStatusCompat:
     PENDING = BookingStatus.REQUESTED
     REQUESTED = BookingStatus.REQUESTED
