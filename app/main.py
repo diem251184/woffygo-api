@@ -67,6 +67,19 @@ async def lifespan(app: FastAPI):
 
                 conn.execute(text("DO $$ BEGIN ALTER TABLE payments RENAME COLUMN walk_id TO booking_id; EXCEPTION WHEN undefined_column THEN null; END $$;"))
 
+            # Columnas requeridas en bookings
+            booking_cols = [
+                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS cancellation_reason VARCHAR(255);",
+                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS cancelled_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL;",
+                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT;",
+                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS duration_minutes INTEGER DEFAULT 60;",
+                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS price_total NUMERIC(10, 2) DEFAULT 0;",
+                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS platform_fee NUMERIC(10, 2) DEFAULT 0;",
+                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS provider_earnings NUMERIC(10, 2) DEFAULT 0;",
+            ]
+            for col in booking_cols:
+                conn.execute(text(col))
+
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS provider_services (
                     id SERIAL PRIMARY KEY,
@@ -106,7 +119,6 @@ app.include_router(auth.router)
 app.include_router(pets.router)
 app.include_router(walkers.router)
 
-# Enrutador unificado accesible tanto por /bookings como por /walks para compatibilidad absoluta
 app.include_router(bookings.router)
 app.include_router(bookings.router, prefix="/walks", tags=["walks-compat"])
 
