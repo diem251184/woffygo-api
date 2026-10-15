@@ -1,5 +1,6 @@
-from datetime import datetime
+﻿from datetime import datetime
 from decimal import Decimal
+import enum
 from sqlalchemy import (
     String,
     DateTime,
@@ -9,7 +10,6 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-import enum
 
 from app.core.database import Base
 
@@ -28,8 +28,8 @@ class Payment(Base):
     __tablename__ = "payments"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    walk_id: Mapped[int] = mapped_column(
-        ForeignKey("walks.id", ondelete="CASCADE"), nullable=False, index=True, unique=True
+    booking_id: Mapped[int] = mapped_column(
+        ForeignKey("bookings.id", ondelete="CASCADE"), nullable=False, index=True, unique=True
     )
     payer_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
@@ -70,5 +70,4 @@ class Payment(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    walk = relationship("Walk")
-    payer = relationship("User", foreign_keys=[payer_id])
+    booking = relationship("Booking")

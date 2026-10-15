@@ -8,20 +8,19 @@ from app.routers import (
     admin,
     app_info,
     auth,
+    bookings,
     messages,
+    payments,
     pets,
     reviews,
-    walkers,
-    walks,
-    payments,
     safety_reports,
     walker_verifications,
+    walkers,
 )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Asegurar que las columnas existan en la BD conectada (Neon / Producción)
     try:
         with engine.connect() as conn:
             queries = [
@@ -32,17 +31,66 @@ async def lifespan(app: FastAPI):
             ]
             for q in queries:
                 conn.execute(text(q))
+
+            conn.execute(text("""
+                DO $$ BEGIN
+                    CREATE TYPE service_type_enum AS ENUM ('WALK', 'TRANSPORT', 'DAYCARE');
+                EXCEPTION
+                    WHEN duplicate_object THEN null;
+                END $$;
+            """))
+
+            conn.execute(text("""
+                DO $$ BEGIN
+                    CREATE TYPE booking_status_enum AS ENUM ('REQUESTED', 'ACCEPTED', 'REJECTED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED');
+                EXCEPTION
+                    WHEN duplicate_object THEN null;
+                END $$;
+            """))
+
+            table_check = conn.execute(text(
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'walks');"
+            )).scalar()
+
+            if table_check:
+                conn.execute(text("ALTER TABLE walks RENAME TO bookings;"))
+                conn.execute(text("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS service_type service_type_enum NOT NULL DEFAULT 'WALK';"))
+                conn.execute(text("DO $$ BEGIN ALTER TABLE bookings RENAME COLUMN walker_id TO provider_id; EXCEPTION WHEN undefined_column THEN null; END $$;"))
+                conn.execute(text("DO $$ BEGIN ALTER TABLE bookings RENAME COLUMN walker_earnings TO provider_earnings; EXCEPTION WHEN undefined_column THEN null; END $$;"))
+                
+                walk_pets_check = conn.execute(text(
+                    "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'walk_pets');"
+                )).scalar()
+                if walk_pets_check:
+                    conn.execute(text("ALTER TABLE walk_pets RENAME TO booking_pets;"))
+                    conn.execute(text("DO $$ BEGIN ALTER TABLE booking_pets RENAME COLUMN walk_id TO booking_id; EXCEPTION WHEN undefined_column THEN null; END $$;"))
+
+                conn.execute(text("DO $$ BEGIN ALTER TABLE payments RENAME COLUMN walk_id TO booking_id; EXCEPTION WHEN undefined_column THEN null; END $$;"))
+
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS provider_services (
+                    id SERIAL PRIMARY KEY,
+                    provider_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    service_type service_type_enum NOT NULL,
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    base_price NUMERIC(10, 2) NOT NULL DEFAULT 0,
+                    price_per_km NUMERIC(10, 2) NOT NULL DEFAULT 0,
+                    price_per_day NUMERIC(10, 2) NOT NULL DEFAULT 0,
+                    service_radius_km INTEGER NOT NULL DEFAULT 3,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+                );
+            """))
             conn.commit()
-            print("[startup] Columnas de perfil verificadas en base de datos.")
     except Exception as e:
-        print(f"[startup] Error verificando columnas: {e}")
+        print(f"[startup] Error inicializando esquema: {e}")
     yield
 
 
 app = FastAPI(
     title="Woofy Go API",
-    version="0.1.0",
-    description="Backend de Woffy Go - paseo de perros en tiempo real",
+    version="0.2.0",
+    description="Backend de Woffy Go - Modelo unificado Booking",
     lifespan=lifespan,
 )
 
@@ -57,7 +105,11 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(pets.router)
 app.include_router(walkers.router)
-app.include_router(walks.router)
+
+# Enrutador unificado accesible tanto por /bookings como por /walks para compatibilidad absoluta
+app.include_router(bookings.router)
+app.include_router(bookings.router, prefix="/walks", tags=["walks-compat"])
+
 app.include_router(messages.router)
 app.include_router(payments.router)
 app.include_router(admin.router)
@@ -69,4 +121,4 @@ app.include_router(walker_verifications.router)
 
 @app.get("/health", tags=["health"])
 def health() -> dict:
-    return {"status": "ok", "service": "woffygo-api"}
+    return {"status": "ok", "service": "woffygo-api", "version": "0.2.0"}

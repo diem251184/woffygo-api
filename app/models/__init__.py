@@ -2,8 +2,8 @@
 from app.models.user import User, UserRole
 from app.models.walker_profile import WalkerProfile
 from app.models.pet import Pet
-from app.models.walk import Walk, WalkStatus
-from app.models.walk_pet import WalkPet
+from app.models.booking import Booking, BookingPet, BookingStatus, ServiceType
+from app.models.provider_service import ProviderService
 from app.models.walk_location import WalkLocation
 from app.models.payment import Payment, PaymentStatus
 from app.models.message import Message
@@ -23,9 +23,11 @@ __all__ = [
     "WalkerVerification",
     "WalkerVerificationStatus",
     "Pet",
-    "Walk",
-    "WalkStatus",
-    "WalkPet",
+    "Booking",
+    "BookingPet",
+    "BookingStatus",
+    "ServiceType",
+    "ProviderService",
     "WalkLocation",
     "Payment",
     "PaymentStatus",

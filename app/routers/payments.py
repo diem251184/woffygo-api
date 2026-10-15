@@ -1,11 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+﻿from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_admin_or_cron, require_role
 from app.models.payment import Payment, PaymentStatus
 from app.models.user import User, UserRole
-from app.models.walk import Walk
+from app.models.booking import Booking
 from app.schemas.payment import (
     PaymentDisputeRequest,
     PaymentResolveRequest,
@@ -25,51 +25,51 @@ router = APIRouter(prefix="/payments", tags=["payments"])
 
 
 @router.post(
-    "/checkout/{walk_id}",
+    "/checkout/{booking_id}",
     response_model=PaymentResponse,
     status_code=status.HTTP_201_CREATED,
 )
 def start_checkout(
-    walk_id: int,
+    booking_id: int,
     current_user: User = Depends(require_role(UserRole.OWNER)),
     db: Session = Depends(get_db),
 ) -> Payment:
-    walk = db.get(Walk, walk_id)
-    if walk is None:
+    booking = db.get(Booking, booking_id)
+    if booking is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Paseo no encontrado",
+            detail="Reserva no encontrada",
         )
-    return create_checkout(db, walk, current_user)
+    return create_checkout(db, booking, current_user)
 
 
-@router.get("/{walk_id}", response_model=PaymentResponse)
-def get_payment_by_walk(
-    walk_id: int,
+@router.get("/{booking_id}", response_model=PaymentResponse)
+def get_payment_by_booking(
+    booking_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Payment:
-    walk = db.get(Walk, walk_id)
-    if walk is None:
+    booking = db.get(Booking, booking_id)
+    if booking is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Paseo no encontrado",
+            detail="Reserva no encontrada",
         )
 
-    is_owner = walk.owner_id == current_user.id
-    is_walker = walk.walker_id == current_user.id
+    is_owner = booking.owner_id == current_user.id
+    is_provider = booking.provider_id == current_user.id
     is_admin = current_user.role == UserRole.ADMIN
-    if not (is_owner or is_walker or is_admin):
+    if not (is_owner or is_provider or is_admin):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="No tenes acceso al pago de este paseo",
+            detail="No tienes acceso al pago de esta reserva",
         )
 
-    payment = db.query(Payment).filter(Payment.walk_id == walk_id).first()
+    payment = db.query(Payment).filter(Payment.booking_id == booking_id).first()
     if payment is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Este paseo no tiene pago iniciado",
+            detail="Esta reserva no tiene pago iniciado",
         )
     return payment
 
@@ -100,27 +100,13 @@ def admin_resolve_payment(
     current_user: User = Depends(require_role(UserRole.ADMIN)),
     db: Session = Depends(get_db),
 ) -> Payment:
-    payment = resolve_dispute(
+    return resolve_dispute(
         db,
         payment_id,
         current_user,
         payload.release_to_walker,
         payload.resolution_note,
     )
-
-    # Log de auditoria
-    try:
-        from app.services.admin_log import log_action
-        accion_str = "libero al walker" if payload.release_to_walker else "reembolso al owner"
-        log_action(
-            db, current_user, "dispute_resolve", "payment", payment.id,
-            f"Resolvio disputa del pago #{payment.id} ({accion_str})"
-            + (f": {payload.resolution_note}" if payload.resolution_note else ""),
-        )
-    except Exception as _e:
-        print(f"[admin_log] Error logueando dispute_resolve: {_e}")
-
-    return payment
 
 
 @router.post("/admin/release-expired")
@@ -159,7 +145,6 @@ async def mercadopago_webhook(
         or request.query_params.get("type")
         or request.query_params.get("topic")
     )
-
     data_id = (
         (payload.get("data") or {}).get("id")
         or request.query_params.get("data.id")
@@ -179,7 +164,7 @@ async def mercadopago_webhook(
 
 @router.get("/return/success")
 def return_success(
-    walk_id: int = Query(...),
+    booking_id: int = Query(...),
     payment_id: str | None = Query(default=None),
     status: str | None = Query(default=None),
     db: Session = Depends(get_db),
@@ -191,35 +176,7 @@ def return_success(
             pass
     return {
         "result": "success",
-        "walk_id": walk_id,
-        "payment_id": payment_id,
-        "mp_status": status,
-    }
-
-
-@router.get("/return/failure")
-def return_failure(
-    walk_id: int = Query(...),
-    payment_id: str | None = Query(default=None),
-    status: str | None = Query(default=None),
-) -> dict:
-    return {
-        "result": "failure",
-        "walk_id": walk_id,
-        "payment_id": payment_id,
-        "mp_status": status,
-    }
-
-
-@router.get("/return/pending")
-def return_pending(
-    walk_id: int = Query(...),
-    payment_id: str | None = Query(default=None),
-    status: str | None = Query(default=None),
-) -> dict:
-    return {
-        "result": "pending",
-        "walk_id": walk_id,
+        "booking_id": booking_id,
         "payment_id": payment_id,
         "mp_status": status,
     }
