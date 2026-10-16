@@ -82,7 +82,7 @@ def login(payload: UserLogin, db: Session = Depends(get_db)) -> Token:
         )
 
     token = create_access_token(user.id, {"role": user.role.value})
-    return Token(access_token=token)
+    return Token(access_token=token, user=user)
 
 
 @router.get("/me", response_model=UserResponse)
