@@ -12,6 +12,7 @@ from app.routers import (
     pets,
     reviews,
     safety_reports,
+    users,
     walker_verifications,
     walkers,
 )
@@ -38,6 +39,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(users.router)
 app.include_router(pets.router)
 app.include_router(walkers.router)
 app.include_router(bookings.router)
