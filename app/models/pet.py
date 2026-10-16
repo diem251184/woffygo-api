@@ -1,5 +1,5 @@
 ﻿from datetime import datetime
-from sqlalchemy import String, Integer, Float, DateTime, ForeignKey, func
+from sqlalchemy import String, DateTime, ForeignKey, func, Float, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -9,12 +9,25 @@ class Pet(Base):
     __tablename__ = "pets"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    name: Mapped[str] = mapped_column(String(60), nullable=False)
-    breed: Mapped[str | None] = mapped_column(String(60), nullable=True)
-    size: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    notes: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    owner_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    breed: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    age_years: Mapped[int | None] = mapped_column(nullable=True)
+    notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # Foto real del perro
     photo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    size: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    weight_kg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    aggressive_with_dogs: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    aggressive_with_people: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

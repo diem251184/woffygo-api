@@ -167,4 +167,4 @@ class BookingPet(Base):
     )
 
     booking = relationship("Booking", back_populates="booking_pets")
-    pet = relationship("Pet")
+    pet = relationship("Pet", back_populates="booking_associations")
