@@ -24,7 +24,10 @@ class User(Base):
         SAEnum(UserRole, name="user_role", values_callable=lambda x: [e.value for e in x]),
         nullable=False,
     )
-    
+
+    # Foto de perfil del usuario (Dueño / Paseador)
+    profile_photo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
     # Campos de perfil extendido (Seguridad/KYC estilo Uber)
     dni_number: Mapped[str | None] = mapped_column(String(30), nullable=True)
     address: Mapped[str | None] = mapped_column(String(255), nullable=True)
