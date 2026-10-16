@@ -18,6 +18,11 @@ class UserCreate(UserBase):
     emergency_contact: str | None = None
 
 
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+
 class UserUpdate(BaseModel):
     full_name: str | None = Field(default=None, min_length=2, max_length=120)
     phone: str | None = Field(default=None, min_length=6, max_length=30)
