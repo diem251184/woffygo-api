@@ -1,5 +1,5 @@
 ﻿from datetime import datetime, date
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from app.models.user import UserRole
 
 
@@ -34,6 +34,8 @@ class UserUpdate(BaseModel):
 
 
 class UserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     email: EmailStr
     full_name: str
@@ -48,14 +50,11 @@ class UserResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
-
 
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
-    user: UserResponse
+    user: UserResponse | None = None
 
 
 class TokenData(BaseModel):
