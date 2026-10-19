@@ -8,6 +8,7 @@ from app.core.deps import get_current_user
 from app.models.message import Message
 from app.models.user import User, UserRole
 from app.models.walk import Walk, WalkStatus
+from app.models.booking import Booking, BookingStatus
 from app.schemas.message import MessageCreate, MessageResponse
 from app.services.chat_filter import filter_contact_info
 from app.services import push
@@ -23,14 +24,25 @@ CHAT_ALLOWED_STATUSES = {
 }
 
 
-def _get_walk_or_404(db: Session, walk_id: int) -> Walk:
+class WalkWrapper:
+    def __init__(self, obj):
+        self.id = obj.id
+        self.owner_id = obj.owner_id
+        self.walker_id = getattr(obj, "provider_id", getattr(obj, "walker_id", None))
+        raw_st = obj.status.value if hasattr(obj.status, "value") else str(obj.status)
+        self.status_val = raw_st.upper()
+
+def _get_walk_or_404(db: Session, walk_id: int):
     walk = db.get(Walk, walk_id)
-    if walk is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Paseo no encontrado",
-        )
-    return walk
+    if walk is not None:
+        return WalkWrapper(walk)
+    booking = db.get(Booking, walk_id)
+    if booking is not None:
+        return WalkWrapper(booking)
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Paseo o reserva no encontrado",
+    )
 
 
 def _ensure_participant(walk: Walk, user: User) -> None:
@@ -55,7 +67,8 @@ def send_message(
     walk = _get_walk_or_404(db, walk_id)
     _ensure_participant(walk, current_user)
 
-    if current_user.role != UserRole.ADMIN and walk.status not in CHAT_ALLOWED_STATUSES:
+    allowed = {"ACCEPTED", "IN_PROGRESS", "COMPLETED"}
+    if current_user.role != UserRole.ADMIN and walk.status_val not in allowed:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"El chat no esta disponible en estado {walk.status.value}",

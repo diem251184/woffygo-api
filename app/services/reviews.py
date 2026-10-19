@@ -96,7 +96,7 @@ def get_review_by_walk(db: Session, walk_id: int, user: User) -> Review | None:
         )
 
     is_owner = walk.owner_id == user.id
-    is_walker = walk.walker_id == user.id
+    is_walker = getattr(walk, "walker_id", getattr(walk, "provider_id", None)) == user.id
     is_admin = user.role == UserRole.ADMIN
 
     if not (is_owner or is_walker or is_admin):

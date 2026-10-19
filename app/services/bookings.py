@@ -1,4 +1,4 @@
-﻿from datetime import datetime, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from fastapi import HTTPException, status
 from geoalchemy2.elements import WKTElement
@@ -112,7 +112,7 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
         pickup_address=payload.pickup_address,
         duration_minutes=payload.duration_minutes,
         notes=payload.notes,
-        price_total=Decimal("0.00"),
+        price_total=payload.estimated_price if payload.estimated_price is not None else Decimal("0.00"),
         platform_fee=Decimal("0.00"),
         provider_earnings=Decimal("0.00"),
         requested_at=now,
@@ -146,13 +146,29 @@ def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
             detail="Debes tener tu perfil activo y estar online para aceptar solicitudes",
         )
 
+    active_booking = db.query(Booking).filter(
+        Booking.provider_id == provider.id,
+        Booking.status.in_([BookingStatus.ACCEPTED, BookingStatus.IN_PROGRESS]),
+    ).first()
+    if active_booking:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ya tienes un servicio activo. Debes finalizarlo antes de tomar otro.",
+        )
+
     num_pets = len(booking.booking_pets)
-    price_total, fee, earnings = calculate_quote(
-        profile.hourly_rate,
-        booking.duration_minutes,
-        num_pets,
-        profile.total_walks,
-    )
+    if booking.service_type == ServiceType.TRANSPORT and booking.price_total > Decimal("0.00"):
+        price_total = booking.price_total
+        fee_rate = get_platform_fee_rate(profile.total_walks)
+        fee = (price_total * fee_rate).quantize(Decimal("0.01"))
+        earnings = price_total - fee
+    else:
+        price_total, fee, earnings = calculate_quote(
+            profile.hourly_rate,
+            booking.duration_minutes,
+            num_pets,
+            profile.total_walks,
+        )
 
     booking.provider_id = provider.id
     booking.status = BookingStatus.ACCEPTED
@@ -257,7 +273,12 @@ def cancel_booking(db: Session, user: User, booking_id: int, reason: str | None)
     return booking
 
 
+WALK_MAX_RADIUS_KM = 6
+
+
 def notify_nearby_providers_new_booking(db: Session, booking: Booking, pets: list) -> None:
+    is_transport = booking.service_type == ServiceType.TRANSPORT
+
     sql = text(
         """
         SELECT wp.user_id
@@ -265,22 +286,41 @@ def notify_nearby_providers_new_booking(db: Session, booking: Booking, pets: lis
         JOIN users u ON u.id = wp.user_id
         WHERE wp.is_online = true
           AND u.is_active = true
-          AND wp.current_location IS NOT NULL
-          AND ST_DWithin(
-              wp.current_location,
-              (SELECT pickup_location FROM bookings WHERE id = :booking_id),
-              wp.search_radius_km * 1000
+          AND (
+              :is_transport = true
+              OR (
+                  wp.current_location IS NOT NULL
+                  AND ST_DWithin(
+                      wp.current_location,
+                      (SELECT pickup_location FROM bookings WHERE id = :booking_id),
+                      LEAST(wp.search_radius_km, :walk_max_radius_km) * 1000
+                  )
+              )
           )
         """
     )
-    rows = db.execute(sql, {"booking_id": booking.id}).all()
+    rows = db.execute(
+        sql,
+        {
+            "booking_id": booking.id,
+            "is_transport": is_transport,
+            "walk_max_radius_km": WALK_MAX_RADIUS_KM,
+        },
+    ).all()
     user_ids = [r.user_id for r in rows]
     if user_ids:
-        pets_str = ", ".join(p.name for p in pets)
+        pets_names = ", ".join(p.name for p in pets)
+        if is_transport:
+            title = "Nueva solicitud de traslado"
+            body = f"{pets_names}\n{booking.pickup_address}"
+        else:
+            title = "Nueva solicitud de paseo"
+            body = f"{pets_names} · {booking.duration_minutes} min\n{booking.pickup_address}"
+
         push.send_to_users(
             db,
             user_ids,
-            "🔔 Nueva solicitud disponible",
-            f"{pets_str} · {booking.duration_minutes} min\n{booking.pickup_address}",
+            title,
+            body,
             {"type": "new_booking", "booking_id": booking.id},
         )

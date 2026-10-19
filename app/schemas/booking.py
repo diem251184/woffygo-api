@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 from decimal import Decimal
 from pydantic import BaseModel, Field
 from app.models.booking import ServiceType, BookingStatus
@@ -13,6 +13,7 @@ class BookingCreate(BaseModel):
     pickup_address: str
     duration_minutes: int = Field(default=30, ge=15, le=180)
     notes: str | None = None
+    estimated_price: Decimal | None = None
 
 
 class BookingQuoteRequest(BaseModel):

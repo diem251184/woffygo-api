@@ -197,3 +197,58 @@ def add_location(
     db.add(loc)
     db.commit()
     return {"status": "ok"}
+from geoalchemy2.functions import ST_X, ST_Y
+
+import json
+from sqlalchemy import func
+
+@router.get("/{booking_id}/locations")
+def get_booking_locations(
+    booking_id: int,
+    limit: int = 500,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    booking = get_booking_or_404(db, booking_id)
+    if booking.owner_id != current_user.id and booking.provider_id != current_user.id:
+        raise HTTPException(status_code=403, detail="No autorizado a ver este viaje")
+
+    query = (
+        db.query(
+            WalkLocation.id,
+            WalkLocation.walk_id,
+            func.ST_AsGeoJSON(WalkLocation.location).label("geojson"),
+            WalkLocation.accuracy_meters,
+            WalkLocation.speed_kmh,
+            WalkLocation.recorded_at,
+        )
+        .filter(WalkLocation.walk_id == booking_id)
+        .order_by(WalkLocation.recorded_at.asc())
+        .limit(limit)
+    )
+
+    results = []
+    for r in query.all():
+        lat = 0.0
+        lon = 0.0
+        if r.geojson:
+            try:
+                geom = json.loads(r.geojson)
+                coords = geom.get("coordinates", [0.0, 0.0])
+                lon = float(coords[0])
+                lat = float(coords[1])
+            except Exception:
+                pass
+
+        results.append({
+            "id": r.id,
+            "walk_id": r.walk_id,
+            "latitude": lat,
+            "longitude": lon,
+            "accuracy_meters": str(r.accuracy_meters) if r.accuracy_meters is not None else None,
+            "speed_kmh": str(r.speed_kmh) if r.speed_kmh is not None else None,
+            "recorded_at": r.recorded_at.isoformat() if r.recorded_at else "",
+        })
+
+    return results
+

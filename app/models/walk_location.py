@@ -27,3 +27,5 @@ class WalkLocation(Base):
         back_populates="locations",
         primaryjoin="WalkLocation.walk_id == Booking.id",
     )
+
+import app.models.walk_location_ext

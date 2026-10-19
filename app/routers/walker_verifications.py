@@ -1,4 +1,4 @@
-﻿from datetime import datetime, timezone
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.orm import Session
@@ -16,7 +16,7 @@ from app.schemas.walker_verification import (
     WalkerVerificationStatusOut,
 )
 from app.services import admin_log, email, push
-from app.services.storage import upload_image_to_r2
+from app.services.cloudinary_service import upload_kyc_document
 
 
 router = APIRouter(prefix="/walker-verifications", tags=["walker-verifications"])
@@ -62,23 +62,11 @@ async def upload_verification(
         back_bytes = await dni_back.read()
         selfie_bytes = await selfie.read()
 
-        front_url = upload_image_to_r2(
-            front_bytes,
-            dni_front.filename or "dni_front.jpg",
-            dni_front.content_type or "image/jpeg",
-        )
-        back_url = upload_image_to_r2(
-            back_bytes,
-            dni_back.filename or "dni_back.jpg",
-            dni_back.content_type or "image/jpeg",
-        )
-        selfie_url = upload_image_to_r2(
-            selfie_bytes,
-            selfie.filename or "selfie.jpg",
-            selfie.content_type or "image/jpeg",
-        )
+        front_url = upload_kyc_document(front_bytes, current_user.id, "dni_front")
+        back_url = upload_kyc_document(back_bytes, current_user.id, "dni_back")
+        selfie_url = upload_kyc_document(selfie_bytes, current_user.id, "selfie")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error subiendo archivos a R2: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error subiendo archivos: {str(e)}")
 
     if existing:
         existing.dni_front_url = front_url

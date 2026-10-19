@@ -1,4 +1,4 @@
-﻿"""Servicio de subida de imágenes a Cloudinary para KYC, Mascotas y Usuarios."""
+"""Servicio de subida de imágenes a Cloudinary para KYC, Mascotas y Usuarios."""
 import cloudinary
 import cloudinary.uploader
 from app.core.config import settings
@@ -31,5 +31,17 @@ def upload_user_avatar_to_cloudinary(file_bytes: bytes, user_id: int) -> str:
             {"width": 500, "height": 500, "crop": "fill", "gravity": "face"},
             {"quality": "auto", "fetch_format": "auto"}
         ],
+    )
+    return result["secure_url"]
+
+def upload_kyc_document(file_bytes: bytes, user_id: int, doc_type: str) -> str:
+    """Sube un documento de identidad/KYC de paseador a Cloudinary de forma segura."""
+    result = cloudinary.uploader.upload(
+        file_bytes,
+        folder=f"woffygo/kyc/{user_id}",
+        public_id=doc_type,
+        overwrite=True,
+        resource_type="image",
+        transformation=[{"quality": "auto", "fetch_format": "auto"}],
     )
     return result["secure_url"]
