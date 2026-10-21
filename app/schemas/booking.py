@@ -11,6 +11,9 @@ class BookingCreate(BaseModel):
     pickup_latitude: float
     pickup_longitude: float
     pickup_address: str
+    dropoff_latitude: float | None = None
+    dropoff_longitude: float | None = None
+    dropoff_address: str | None = None
     duration_minutes: int = Field(default=30, ge=15, le=180)
     notes: str | None = None
     estimated_price: Decimal | None = None
@@ -18,9 +21,13 @@ class BookingCreate(BaseModel):
 
 class BookingQuoteRequest(BaseModel):
     service_type: ServiceType = ServiceType.WALK
-    provider_id: int
+    provider_id: int | None = None
     duration_minutes: int = 30
-    num_pets: int = 1
+    num_pets: int = Field(default=1, ge=1, le=3)
+    origin_latitude: float | None = None
+    origin_longitude: float | None = None
+    destination_latitude: float | None = None
+    destination_longitude: float | None = None
 
 
 class BookingQuoteResponse(BaseModel):
@@ -28,6 +35,7 @@ class BookingQuoteResponse(BaseModel):
     platform_fee: Decimal
     provider_earnings: Decimal
     currency: str = "ARS"
+    distance_km: Decimal | None = None
 
 
 class BookingStatusUpdateRequest(BaseModel):

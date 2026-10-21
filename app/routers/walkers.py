@@ -1,4 +1,5 @@
-﻿from fastapi import APIRouter, Depends, HTTPException, Query, status
+from decimal import Decimal
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -19,6 +20,7 @@ from app.services.geo import (
     set_walker_online,
     update_walker_location,
 )
+from app.services.pricing import WALK_HOURLY_RATE
 
 
 router = APIRouter(prefix="/walkers", tags=["walkers"])
@@ -55,7 +57,7 @@ def create_profile(
     profile = WalkerProfile(
         user_id=current_user.id,
         bio=payload.bio,
-        hourly_rate=payload.hourly_rate,
+        hourly_rate=WALK_HOURLY_RATE,
         search_radius_km=payload.search_radius_km,
     )
     db.add(profile)
@@ -81,8 +83,6 @@ def update_my_profile(
     profile = _get_or_404_profile(db, current_user)
     if payload.bio is not None:
         profile.bio = payload.bio
-    if payload.hourly_rate is not None:
-        profile.hourly_rate = payload.hourly_rate
     if payload.search_radius_km is not None:
         profile.search_radius_km = payload.search_radius_km
     db.commit()

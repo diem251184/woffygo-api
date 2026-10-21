@@ -10,9 +10,12 @@ from app.models.payment import Payment, PaymentStatus
 from app.models.pet import Pet
 from app.models.user import User, UserRole
 from app.models.walker_profile import WalkerProfile
+from app.models.walker_verification import WalkerVerification, WalkerVerificationStatus
 from app.schemas.booking import BookingCreate
 from app.services import push
 from app.services.escrow import start_escrow_window
+from app.services.pricing import walk_price, transport_price
+from app.services.routing import get_driving_distance_km
 
 ALLOWED_TRANSITIONS: dict[BookingStatus, set[BookingStatus]] = {
     BookingStatus.REQUESTED: {BookingStatus.ACCEPTED, BookingStatus.REJECTED, BookingStatus.CANCELLED},
@@ -29,7 +32,6 @@ COMMISSION_TIERS = [
     (50, 999999, Decimal("0.12")),
 ]
 
-PET_MULTIPLIERS = [Decimal("1.00"), Decimal("0.75"), Decimal("0.50")]
 MAX_PETS = 3
 
 
@@ -67,15 +69,25 @@ def get_booking_or_404(db: Session, booking_id: int) -> Booking:
 
 
 def calculate_quote(
-    hourly_rate: Decimal,
+    service_type: ServiceType,
     duration_minutes: int,
     num_pets: int,
     completed_services: int,
+    distance_km: Decimal | None = None,
 ) -> tuple[Decimal, Decimal, Decimal]:
-    hours = Decimal(duration_minutes) / Decimal(60)
-    base_price = hourly_rate * hours
-    multiplier_sum = sum(PET_MULTIPLIERS[:num_pets], Decimal("0"))
-    price_total = (base_price * multiplier_sum).quantize(Decimal("0.01"))
+    """Calcula precio total, comision y ganancia segun reglas oficiales del servidor."""
+    if service_type == ServiceType.WALK:
+        price_total = walk_price(duration_minutes, num_pets)
+    elif service_type == ServiceType.TRANSPORT:
+        if distance_km is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Se requiere la distancia calculada para cotizar Pet Taxi",
+            )
+        price_total = transport_price(distance_km, num_pets)
+    else:
+        price_total = walk_price(duration_minutes, num_pets)
+
     fee_rate = get_platform_fee_rate(completed_services)
     fee = (price_total * fee_rate).quantize(Decimal("0.01"))
     earnings = price_total - fee
@@ -102,6 +114,29 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
                 detail=f"La mascota '{pet.name}' no te pertenece",
             )
 
+    num_pets = len(pets)
+    distance_meters: Decimal | None = None
+
+    if payload.service_type == ServiceType.TRANSPORT:
+        if (
+            payload.dropoff_latitude is None
+            or payload.dropoff_longitude is None
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Pet Taxi requiere coordenadas de destino validas",
+            )
+        dist_km = get_driving_distance_km(
+            payload.pickup_latitude,
+            payload.pickup_longitude,
+            payload.dropoff_latitude,
+            payload.dropoff_longitude,
+        )
+        distance_meters = (dist_km * Decimal("1000")).quantize(Decimal("0.01"))
+        price_total = transport_price(dist_km, num_pets)
+    else:
+        price_total = walk_price(payload.duration_minutes, num_pets)
+
     now = _now()
     booking = Booking(
         owner_id=owner.id,
@@ -112,9 +147,10 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
         pickup_address=payload.pickup_address,
         duration_minutes=payload.duration_minutes,
         notes=payload.notes,
-        price_total=payload.estimated_price if payload.estimated_price is not None else Decimal("0.00"),
+        price_total=price_total,
         platform_fee=Decimal("0.00"),
         provider_earnings=Decimal("0.00"),
+        distance_meters=distance_meters,
         requested_at=now,
         flagged_for_review=False,
     )
@@ -136,9 +172,29 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
 
 
 def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
-    booking = get_booking_or_404(db, booking_id)
+    # 1. Bloqueo pesimista de fila en BD para evitar asignaciones concurrentes
+    booking = (
+        db.query(Booking)
+        .filter(Booking.id == booking_id)
+        .with_for_update()
+        .first()
+    )
+    if booking is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Reserva no encontrada",
+        )
+
+    # 2. Validar que la reserva siga disponible
+    if booking.status != BookingStatus.REQUESTED or booking.provider_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Esta solicitud ya fue aceptada por otro paseador o ya no está disponible",
+        )
+
     validate_status_transition(booking.status, BookingStatus.ACCEPTED)
 
+    # 3. Validar estado y verificacion del paseador
     profile = db.query(WalkerProfile).filter(WalkerProfile.user_id == provider.id).first()
     if profile is None or not profile.is_online:
         raise HTTPException(
@@ -146,6 +202,19 @@ def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
             detail="Debes tener tu perfil activo y estar online para aceptar solicitudes",
         )
 
+    verification = (
+        db.query(WalkerVerification)
+        .filter(WalkerVerification.user_id == provider.id)
+        .order_by(WalkerVerification.id.desc())
+        .first()
+    )
+    if not verification or verification.status != WalkerVerificationStatus.APPROVED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tu cuenta debe estar verificada por un administrador para aceptar solicitudes",
+        )
+
+    # 4. Validar que el paseador no tenga ya un servicio en curso
     active_booking = db.query(Booking).filter(
         Booking.provider_id == provider.id,
         Booking.status.in_([BookingStatus.ACCEPTED, BookingStatus.IN_PROGRESS]),
@@ -157,18 +226,15 @@ def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
         )
 
     num_pets = len(booking.booking_pets)
-    if booking.service_type == ServiceType.TRANSPORT and booking.price_total > Decimal("0.00"):
-        price_total = booking.price_total
-        fee_rate = get_platform_fee_rate(profile.total_walks)
-        fee = (price_total * fee_rate).quantize(Decimal("0.01"))
-        earnings = price_total - fee
-    else:
-        price_total, fee, earnings = calculate_quote(
-            profile.hourly_rate,
-            booking.duration_minutes,
-            num_pets,
-            profile.total_walks,
-        )
+    dist_km = (booking.distance_meters / Decimal("1000")) if booking.distance_meters else None
+
+    price_total, fee, earnings = calculate_quote(
+        booking.service_type,
+        booking.duration_minutes,
+        num_pets,
+        profile.total_walks,
+        dist_km,
+    )
 
     booking.provider_id = provider.id
     booking.status = BookingStatus.ACCEPTED

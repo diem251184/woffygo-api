@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -18,7 +18,11 @@ from app.services.escrow import (
     release_payment,
     resolve_dispute,
 )
-from app.services.mercadopago import create_checkout, sync_payment_from_mp
+from app.services.mercadopago import (
+    create_checkout,
+    sync_payment_from_mp,
+    verify_mercadopago_signature,
+)
 
 
 router = APIRouter(prefix="/payments", tags=["payments"])
@@ -154,6 +158,15 @@ async def mercadopago_webhook(
     if topic != "payment" or not data_id:
         return {"status": "ignored", "reason": "no es un evento de pago"}
 
+    # Validacion criptografica de firma HMAC
+    x_signature = request.headers.get("x-signature")
+    x_request_id = request.headers.get("x-request-id")
+    if not verify_mercadopago_signature(x_signature, x_request_id, str(data_id)):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Firma de webhook de Mercado Pago invalida",
+        )
+
     try:
         sync_payment_from_mp(db, str(data_id))
     except HTTPException as e:
@@ -166,17 +179,25 @@ async def mercadopago_webhook(
 def return_success(
     booking_id: int = Query(...),
     payment_id: str | None = Query(default=None),
-    status: str | None = Query(default=None),
+    status_param: str | None = Query(default=None, alias="status"),
     db: Session = Depends(get_db),
 ) -> dict:
+    # La URL del navegador nunca confirma el pago por si sola.
+    # Se intenta sincronizar si llego payment_id, pero se informa el estado real en BD.
     if payment_id:
         try:
             sync_payment_from_mp(db, payment_id)
         except HTTPException:
             pass
+
+    payment = db.query(Payment).filter(Payment.booking_id == booking_id).first()
+    real_status = payment.status.value if payment else "desconocido"
+    is_approved = payment is not None and payment.status == PaymentStatus.APPROVED
+
     return {
-        "result": "success",
+        "result": "success" if is_approved else "pending",
         "booking_id": booking_id,
         "payment_id": payment_id,
-        "mp_status": status,
+        "payment_status": real_status,
+        "is_approved": is_approved,
     }

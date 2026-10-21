@@ -1,4 +1,4 @@
-﻿from app.models.safety_report import SafetyReport, SafetyCategory
+from app.models.safety_report import SafetyReport, SafetyCategory
 from app.models.user import User, UserRole
 from app.models.walker_profile import WalkerProfile
 from app.models.pet import Pet
@@ -34,5 +34,8 @@ __all__ = [
     "Message",
     "Review",
     "DeviceToken",
+    "AdminAction",
     "PasswordResetToken",
+    "SafetyReport",
+    "SafetyCategory",
 ]

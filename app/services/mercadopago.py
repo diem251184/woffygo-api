@@ -1,5 +1,7 @@
-﻿from datetime import datetime, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
+import hmac
+import hashlib
 from typing import Any
 from urllib.parse import urlparse
 
@@ -43,6 +45,41 @@ def _is_public_url(url: str) -> bool:
     return True
 
 
+def verify_mercadopago_signature(
+    x_signature: str | None,
+    x_request_id: str | None,
+    data_id: str | None,
+) -> bool:
+    """Valida la firma HMAC-SHA256 enviada por Mercado Pago en el webhook."""
+    secret = (getattr(settings, "MERCADOPAGO_WEBHOOK_SECRET", None) or "").strip()
+    if not secret:
+        # Si no hay secreto configurado (ej. pruebas locales), no valida
+        return True
+
+    if not x_signature or not data_id:
+        return False
+
+    parts = {}
+    for item in x_signature.split(","):
+        if "=" in item:
+            k, v = item.strip().split("=", 1)
+            parts[k] = v
+
+    ts = parts.get("ts")
+    v1 = parts.get("v1")
+    if not ts or not v1:
+        return False
+
+    manifest = f"id:{data_id};request-id:{x_request_id or ''};ts:{ts};"
+    computed = hmac.new(
+        secret.encode("utf-8"),
+        manifest.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    return hmac.compare_digest(computed, v1)
+
+
 def create_checkout(
     db: Session,
     booking: Booking,
@@ -69,10 +106,10 @@ def create_checkout(
         )
 
     existing = db.query(Payment).filter(Payment.booking_id == booking.id).first()
-    if existing is not None and existing.status == PaymentStatus.APPROVED:
+    if existing is not None and existing.status in (PaymentStatus.APPROVED, PaymentStatus.RELEASED):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Esta reserva ya tiene un pago aprobado",
+            detail="Esta reserva ya tiene un pago aprobado o completado",
         )
 
     sdk = _sdk()
@@ -165,7 +202,15 @@ def get_mp_payment(mp_payment_id: str) -> dict:
     return result["response"]
 
 
+FINAL_OR_PROTECTED_STATUSES = {
+    PaymentStatus.APPROVED,
+    PaymentStatus.RELEASED,
+    PaymentStatus.DISPUTED,
+}
+
+
 def sync_payment_from_mp(db: Session, mp_payment_id: str) -> Payment | None:
+    """Sincroniza el estado del pago validando correspondencia, importe, moneda y protegiendo de regresiones."""
     mp_payment = get_mp_payment(mp_payment_id)
     external_reference = mp_payment.get("external_reference")
 
@@ -187,10 +232,41 @@ def sync_payment_from_mp(db: Session, mp_payment_id: str) -> Payment | None:
     if payment is None:
         return None
 
+    # Verificacion de integridad financiera si viene con aprobacion
+    raw_status = mp_payment.get("status", "pending")
+    new_status = _map_mp_status(raw_status)
+
+    if new_status == PaymentStatus.APPROVED:
+        # 1. Validar moneda
+        currency = mp_payment.get("currency_id")
+        if currency != "ARS":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Moneda invalida recibida de MercadoPago: {currency}",
+            )
+
+        # 2. Validar que el monto cobrado coincida con el importe de la reserva
+        paid_amount = Decimal(str(mp_payment.get("transaction_amount", 0)))
+        if paid_amount < payment.amount:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Importe insuficiente: pagado {paid_amount}, requerido {payment.amount}",
+            )
+
+    # Proteccion contra regresiones de estado:
+    # Un pago que ya fue APROBADO o LIBERADO no puede retroceder a pendiente o cancelado por un webhook viejo
+    if payment.status in FINAL_OR_PROTECTED_STATUSES and new_status not in (
+        PaymentStatus.APPROVED,
+        PaymentStatus.REFUNDED,
+        PaymentStatus.RELEASED,
+        PaymentStatus.DISPUTED,
+    ):
+        return payment
+
     payment.mp_payment_id = str(mp_payment.get("id"))
     payment.mp_status_detail = mp_payment.get("status_detail")
-    new_status = _map_mp_status(mp_payment.get("status", "pending"))
     payment.status = new_status
+
     if new_status == PaymentStatus.APPROVED and payment.approved_at is None:
         payment.approved_at = datetime.now(timezone.utc)
 

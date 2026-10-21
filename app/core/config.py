@@ -26,10 +26,6 @@ class Settings(BaseSettings):
     CLOUDINARY_API_KEY: str = ""
     CLOUDINARY_API_SECRET: str = ""
 
-    # Rango de tarifas por hora para paseadores
-    MIN_HOURLY_RATE: Decimal = Decimal("2500.00")
-    MAX_HOURLY_RATE: Decimal = Decimal("3500.00")
-
     PUBLIC_BASE_URL: str = "https://woffygo-api.onrender.com"
 
     # Recuperacion de contrasena (Resend)
@@ -50,14 +46,6 @@ class Settings(BaseSettings):
     MIN_SUPPORTED_APP_VERSION: str = "1.0.0"
     APP_DOWNLOAD_URL: str = "https://woffygo-api.onrender.com/descargar"
     APP_RELEASE_NOTES: str = ""
-
-    @field_validator("MAX_HOURLY_RATE")
-    @classmethod
-    def max_must_be_greater_than_min(cls, v: Decimal, info) -> Decimal:
-        min_rate = info.data.get("MIN_HOURLY_RATE")
-        if min_rate is not None and v < min_rate:
-            raise ValueError("MAX_HOURLY_RATE debe ser >= MIN_HOURLY_RATE")
-        return v
 
 
 settings = Settings()

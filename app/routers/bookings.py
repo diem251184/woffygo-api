@@ -1,13 +1,18 @@
-﻿from fastapi import APIRouter, Depends, HTTPException, Query, status
+from decimal import Decimal
+import json
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from geoalchemy2.elements import WKTElement
-from sqlalchemy import text
+from geoalchemy2.functions import ST_X, ST_Y
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_role
-from app.models.user import User, UserRole
 from app.models.booking import Booking, BookingPet, BookingStatus, ServiceType
+from app.models.user import User, UserRole
 from app.models.walk_location import WalkLocation
+from app.models.walker_profile import WalkerProfile
+from app.models.walker_verification import WalkerVerification, WalkerVerificationStatus
 from app.schemas.booking import (
     BookingCreate,
     BookingLocationCreate,
@@ -26,7 +31,7 @@ from app.services.bookings import (
     get_booking_or_404,
     start_booking,
 )
-from app.models.walker_profile import WalkerProfile
+from app.services.routing import get_driving_distance_km
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 
@@ -60,21 +65,45 @@ def quote(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    profile = db.query(WalkerProfile).filter(WalkerProfile.user_id == payload.provider_id).first()
-    if not profile:
-        raise HTTPException(status_code=404, detail="Proveedor no encontrado")
+    completed_services = 0
+    if payload.provider_id is not None:
+        profile = db.query(WalkerProfile).filter(WalkerProfile.user_id == payload.provider_id).first()
+        if profile is not None:
+            completed_services = profile.total_walks
+
+    distance_km: Decimal | None = None
+    if payload.service_type == ServiceType.TRANSPORT:
+        if (
+            payload.origin_latitude is None
+            or payload.origin_longitude is None
+            or payload.destination_latitude is None
+            or payload.destination_longitude is None
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Para cotizar Pet Taxi debes enviar coordenadas de origen y destino",
+            )
+        distance_km = get_driving_distance_km(
+            payload.origin_latitude,
+            payload.origin_longitude,
+            payload.destination_latitude,
+            payload.destination_longitude,
+        )
 
     price, fee, earnings = calculate_quote(
-        profile.hourly_rate,
+        payload.service_type,
         payload.duration_minutes,
         payload.num_pets,
-        profile.total_walks,
+        completed_services,
+        distance_km,
     )
+
     return BookingQuoteResponse(
         price_total=price,
         platform_fee=fee,
         provider_earnings=earnings,
         currency="ARS",
+        distance_km=distance_km,
     )
 
 
@@ -112,6 +141,26 @@ def list_available(
     current_user: User = Depends(require_role(UserRole.WALKER)),
     db: Session = Depends(get_db),
 ):
+    # Verificación de seguridad: solo paseadores online y con KYC aprobado pueden ver servicios disponibles
+    profile = db.query(WalkerProfile).filter(WalkerProfile.user_id == current_user.id).first()
+    if profile is None or not profile.is_online:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Debes tener tu perfil activo y estar online para ver servicios disponibles",
+        )
+
+    verification = (
+        db.query(WalkerVerification)
+        .filter(WalkerVerification.user_id == current_user.id)
+        .order_by(WalkerVerification.id.desc())
+        .first()
+    )
+    if not verification or verification.status != WalkerVerificationStatus.APPROVED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tu cuenta debe estar verificada para ver solicitudes disponibles",
+        )
+
     bookings = (
         db.query(Booking)
         .options(joinedload(Booking.booking_pets).joinedload(BookingPet.pet))
@@ -144,9 +193,22 @@ def get_one(
     is_owner = booking.owner_id == current_user.id
     is_provider = booking.provider_id == current_user.id
     is_admin = current_user.role == UserRole.ADMIN
-    is_open = booking.status == BookingStatus.REQUESTED
 
-    if not (is_owner or is_provider or is_admin or is_open):
+    # Paseador elegible: solo si tiene rol WALKER, está online, verificado y la reserva está libre
+    is_eligible_candidate = False
+    if current_user.role == UserRole.WALKER and booking.status == BookingStatus.REQUESTED and booking.provider_id is None:
+        profile = db.query(WalkerProfile).filter(WalkerProfile.user_id == current_user.id).first()
+        if profile and profile.is_online:
+            verification = (
+                db.query(WalkerVerification)
+                .filter(WalkerVerification.user_id == current_user.id)
+                .order_by(WalkerVerification.id.desc())
+                .first()
+            )
+            if verification and verification.status == WalkerVerificationStatus.APPROVED:
+                is_eligible_candidate = True
+
+    if not (is_owner or is_provider or is_admin or is_eligible_candidate):
         raise HTTPException(status_code=403, detail="Sin acceso a esta reserva")
 
     _attach_extra_fields(db, booking)
@@ -197,20 +259,17 @@ def add_location(
     db.add(loc)
     db.commit()
     return {"status": "ok"}
-from geoalchemy2.functions import ST_X, ST_Y
 
-import json
-from sqlalchemy import func
 
 @router.get("/{booking_id}/locations")
 def get_booking_locations(
     booking_id: int,
-    limit: int = 500,
+    limit: int = Query(default=500, ge=1, le=1000),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     booking = get_booking_or_404(db, booking_id)
-    if booking.owner_id != current_user.id and booking.provider_id != current_user.id:
+    if booking.owner_id != current_user.id and booking.provider_id != current_user.id and current_user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="No autorizado a ver este viaje")
 
     query = (
@@ -251,4 +310,3 @@ def get_booking_locations(
         })
 
     return results
-

@@ -1,7 +1,8 @@
-﻿from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.models.booking import Booking, BookingStatus
 from app.models.payment import Payment, PaymentStatus
 from app.models.user import User, UserRole
 
@@ -47,6 +48,14 @@ def confirm_delivery(db: Session, payment_id: int, current_user: User) -> Paymen
             detail=f"Solo se pueden confirmar pagos aprobados. Estado actual: {payment.status.value}",
         )
 
+    # Validar que el servicio este completado
+    booking = db.get(Booking, payment.booking_id)
+    if booking is None or booking.status != BookingStatus.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No se puede confirmar la entrega de un servicio que no figura como completado",
+        )
+
     payment.confirmed_by_owner_at = _now()
     payment.status = PaymentStatus.RELEASED
     payment.released_at = _now()
@@ -83,6 +92,14 @@ def release_payment(db: Session, payment_id: int) -> Payment:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Solo se pueden liberar pagos aprobados",
         )
+
+    booking = db.get(Booking, payment.booking_id)
+    if booking is None or booking.status != BookingStatus.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El servicio debe estar completado para liberar los fondos contables",
+        )
+
     payment.status = PaymentStatus.RELEASED
     payment.released_at = _now()
     db.commit()
@@ -91,10 +108,17 @@ def release_payment(db: Session, payment_id: int) -> Payment:
 
 
 def release_expired_payments(db: Session) -> list[int]:
+    """
+    Liberación contable automática por vencimiento de plazo de custodia (24h).
+    Requiere obligatoriamente que el servicio este COMPLETED y sin disputas abiertas.
+    """
     now = _now()
     expired = (
         db.query(Payment)
+        .join(Booking, Payment.booking_id == Booking.id)
         .filter(Payment.status == PaymentStatus.APPROVED)
+        .filter(Payment.dispute_opened_at.is_(None))
+        .filter(Booking.status == BookingStatus.COMPLETED)
         .filter(Payment.payment_release_deadline.is_not(None))
         .filter(Payment.payment_release_deadline <= now)
         .all()
