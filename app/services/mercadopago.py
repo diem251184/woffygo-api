@@ -1,274 +1,179 @@
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
-import hmac
-import hashlib
-from typing import Any
-from urllib.parse import urlparse
-
 import mercadopago
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.payment import Payment, PaymentStatus
-from app.models.user import User
 from app.models.booking import Booking, BookingStatus
+from app.models.payment import Payment, PaymentStatus
+from app.schemas.payment import PaymentInitResponse
+
+logger = logging.getLogger("woffygo.payments")
 
 
-def _sdk() -> mercadopago.SDK:
-    if not settings.MERCADOPAGO_ACCESS_TOKEN:
+def _get_mp_sdk() -> mercadopago.SDK:
+    token = (settings.MERCADOPAGO_ACCESS_TOKEN or "").strip()
+    if not token:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="MercadoPago no está configurado. Falta MERCADOPAGO_ACCESS_TOKEN.",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="MERCADOPAGO_ACCESS_TOKEN no configurado en el servidor",
         )
-    return mercadopago.SDK(settings.MERCADOPAGO_ACCESS_TOKEN)
+    return mercadopago.SDK(token)
 
 
-def _map_mp_status(mp_status: str) -> PaymentStatus:
-    mapping = {
-        "approved": PaymentStatus.APPROVED,
-        "pending": PaymentStatus.PENDING,
-        "in_process": PaymentStatus.PENDING,
-        "authorized": PaymentStatus.PENDING,
-        "rejected": PaymentStatus.REJECTED,
-        "cancelled": PaymentStatus.CANCELLED,
-        "refunded": PaymentStatus.REFUNDED,
-        "charged_back": PaymentStatus.REFUNDED,
-    }
-    return mapping.get(mp_status, PaymentStatus.PENDING)
+def create_checkout(db: Session, booking: Booking) -> PaymentInitResponse:
+    """Crea una preferencia de pago en Mercado Pago."""
+    sdk = _get_mp_sdk()
+    amount = float(booking.agreed_price)
+    public_base = (settings.PUBLIC_BASE_URL or "").rstrip("/")
+    if not public_base:
+        public_base = "https://woffygo-api.onrender.com"
 
+    service_title = "Paseo de Mascota" if booking.service_type.value == "WALK" else "Traslado Pet Taxi"
 
-def _is_public_url(url: str) -> bool:
-    host = (urlparse(url).hostname or "").lower()
-    if host in ("127.0.0.1", "localhost", "0.0.0.0", "::1") or host.endswith(".local"):
-        return False
-    return True
-
-
-def verify_mercadopago_signature(
-    x_signature: str | None,
-    x_request_id: str | None,
-    data_id: str | None,
-) -> bool:
-    """Valida la firma HMAC-SHA256 enviada por Mercado Pago en el webhook."""
-    secret = (getattr(settings, "MERCADOPAGO_WEBHOOK_SECRET", None) or "").strip()
-    if not secret:
-        # Si no hay secreto configurado (ej. pruebas locales), no valida
-        return True
-
-    if not x_signature or not data_id:
-        return False
-
-    parts = {}
-    for item in x_signature.split(","):
-        if "=" in item:
-            k, v = item.strip().split("=", 1)
-            parts[k] = v
-
-    ts = parts.get("ts")
-    v1 = parts.get("v1")
-    if not ts or not v1:
-        return False
-
-    manifest = f"id:{data_id};request-id:{x_request_id or ''};ts:{ts};"
-    computed = hmac.new(
-        secret.encode("utf-8"),
-        manifest.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-
-    return hmac.compare_digest(computed, v1)
-
-
-def create_checkout(
-    db: Session,
-    booking: Booking,
-    owner: User,
-    base_url: str | None = None,
-) -> Payment:
-    if base_url is None:
-        base_url = settings.PUBLIC_BASE_URL
-
-    if booking.owner_id != owner.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Solo el dueño de la reserva puede iniciar el pago",
-        )
-    if booking.status == BookingStatus.CANCELLED:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No se puede pagar una reserva cancelada",
-        )
-    if booking.provider_id is None or booking.price_total <= 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="La reserva aún no tiene proveedor asignado o precio cotizado",
-        )
-
-    existing = db.query(Payment).filter(Payment.booking_id == booking.id).first()
-    if existing is not None and existing.status in (PaymentStatus.APPROVED, PaymentStatus.RELEASED):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Esta reserva ya tiene un pago aprobado o completado",
-        )
-
-    sdk = _sdk()
-    amount_float = float(booking.price_total)
-
-    preference_data: dict[str, Any] = {
+    preference_data = {
         "items": [
             {
-                "title": f"Servicio Woffy Go #{booking.id} ({booking.service_type.value})",
-                "description": booking.pickup_address,
+                "id": f"booking-{booking.id}",
+                "title": f"Woffy - {service_title} #{booking.id}",
                 "quantity": 1,
                 "currency_id": "ARS",
-                "unit_price": amount_float,
+                "unit_price": amount,
             }
         ],
+        "payer": {
+            "email": booking.owner.email if booking.owner else "cliente@woffygo.com",
+            "name": booking.owner.full_name if booking.owner else "Cliente Woffy",
+        },
         "external_reference": str(booking.id),
-        "statement_descriptor": "WOFFYGO",
+        "back_urls": {
+            "success": f"{public_base}/payments/return/success?booking_id={booking.id}",
+            "pending": f"{public_base}/payments/return/pending?booking_id={booking.id}",
+            "failure": f"{public_base}/payments/return/failure?booking_id={booking.id}",
+        },
+        "auto_return": "approved",
+        "notification_url": f"{public_base}/payments/webhook",
+        "statement_descriptor": "WOFFY GO",
     }
 
-    if _is_public_url(base_url):
-        preference_data["back_urls"] = {
-            "success": f"{base_url}/payments/return/success?booking_id={booking.id}",
-            "failure": f"{base_url}/payments/return/failure?booking_id={booking.id}",
-            "pending": f"{base_url}/payments/return/pending?booking_id={booking.id}",
-        }
-        preference_data["auto_return"] = "approved"
-        preference_data["notification_url"] = f"{base_url}/payments/webhook"
+    res = sdk.preference().create(preference_data)
+    response = res.get("response") or {}
+    init_point = response.get("init_point")
+    pref_id = response.get("id")
 
-    try:
-        result = sdk.preference().create(preference_data)
-    except Exception as e:
+    if not init_point:
+        logger.error("Error creando preferencia en Mercado Pago: %s", res)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Error comunicándose con MercadoPago: {e}",
+            detail="Error al iniciar la pasarela de pago en Mercado Pago",
         )
 
-    if result.get("status") not in (200, 201):
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"MercadoPago rechazó la creación de la preferencia: {result}",
-        )
-
-    preference = result["response"]
-    preference_id = str(preference.get("id"))
-    init_point = preference.get("init_point") or preference.get("sandbox_init_point")
-
-    if existing is not None:
-        payment = existing
-        payment.amount = booking.price_total
-        payment.platform_fee = booking.platform_fee
-        payment.walker_earnings = booking.provider_earnings
-        payment.mp_preference_id = preference_id
-        payment.init_point = init_point
-        payment.status = PaymentStatus.PENDING
-        payment.mp_payment_id = None
-        payment.mp_status_detail = None
-        payment.approved_at = None
-    else:
+    payment = db.query(Payment).filter(Payment.booking_id == booking.id).first()
+    if not payment:
         payment = Payment(
             booking_id=booking.id,
-            payer_id=owner.id,
-            amount=booking.price_total,
-            platform_fee=booking.platform_fee,
-            walker_earnings=booking.provider_earnings,
+            amount=booking.agreed_price,
+            mp_preference_id=pref_id,
             status=PaymentStatus.PENDING,
-            mp_preference_id=preference_id,
-            init_point=init_point,
         )
         db.add(payment)
+    else:
+        payment.mp_preference_id = pref_id
+        payment.amount = booking.agreed_price
 
     db.commit()
     db.refresh(payment)
-    return payment
+
+    return PaymentInitResponse(
+        checkout_url=init_point,
+        preference_id=pref_id,
+        booking_id=booking.id,
+        amount=payment.amount,
+    )
 
 
-def get_mp_payment(mp_payment_id: str) -> dict:
-    sdk = _sdk()
-    try:
-        result = sdk.payment().get(mp_payment_id)
-    except Exception as e:
+def sync_payment_from_mp(db: Session, mp_payment_id: str) -> Payment:
+    """
+    Sincroniza el estado real de un pago consultando a la API de Mercado Pago.
+    Valida moneda, monto, external_reference y evita regresión de estados.
+    """
+    sdk = _get_mp_sdk()
+    res = sdk.payment().get(str(mp_payment_id))
+    mp_data = res.get("response") or {}
+
+    if not mp_data or "status" not in mp_data:
+        logger.error("Respuesta invalida de MP para pago %s: %s", mp_payment_id, res)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Error consultando el pago en MercadoPago: {e}",
+            detail="No se pudo obtener la informacion del pago desde Mercado Pago",
         )
-    if result.get("status") != 200:
+
+    external_ref = mp_data.get("external_reference")
+    mp_status = mp_data.get("status")
+    currency = mp_data.get("currency_id")
+    transaction_amount = Decimal(str(mp_data.get("transaction_amount") or "0.00"))
+
+    if not external_ref or not str(external_ref).isdigit():
+        logger.error("Pago MP %s no tiene external_reference valido: %s", mp_payment_id, external_ref)
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"MercadoPago no encontró el pago {mp_payment_id}",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El pago no tiene una reserva asociada valida",
         )
-    return result["response"]
 
-
-FINAL_OR_PROTECTED_STATUSES = {
-    PaymentStatus.APPROVED,
-    PaymentStatus.RELEASED,
-    PaymentStatus.DISPUTED,
-}
-
-
-def sync_payment_from_mp(db: Session, mp_payment_id: str) -> Payment | None:
-    """Sincroniza el estado del pago validando correspondencia, importe, moneda y protegiendo de regresiones."""
-    mp_payment = get_mp_payment(mp_payment_id)
-    external_reference = mp_payment.get("external_reference")
-
-    payment: Payment | None = None
-    if external_reference is not None:
-        try:
-            booking_id = int(external_reference)
-        except (TypeError, ValueError):
-            booking_id = None
-        if booking_id is not None:
-            payment = db.query(Payment).filter(Payment.booking_id == booking_id).first()
-
-    if payment is None:
-        payment = (
-            db.query(Payment)
-            .filter(Payment.mp_payment_id == mp_payment_id)
-            .first()
+    booking_id = int(external_ref)
+    booking = db.query(Booking).filter(Booking.id == booking_id).first()
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Reserva #{booking_id} asociada al pago no encontrada",
         )
-    if payment is None:
-        return None
 
-    # Verificacion de integridad financiera si viene con aprobacion
-    raw_status = mp_payment.get("status", "pending")
-    new_status = _map_mp_status(raw_status)
+    if currency != "ARS":
+        logger.error("Moneda invalida en pago %s: %s", mp_payment_id, currency)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Moneda invalida, solo se acepta ARS",
+        )
 
-    if new_status == PaymentStatus.APPROVED:
-        # 1. Validar moneda
-        currency = mp_payment.get("currency_id")
-        if currency != "ARS":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Moneda invalida recibida de MercadoPago: {currency}",
-            )
+    payment = db.query(Payment).filter(Payment.booking_id == booking_id).first()
+    if not payment:
+        payment = Payment(
+            booking_id=booking_id,
+            amount=booking.agreed_price,
+            mp_payment_id=str(mp_payment_id),
+            status=PaymentStatus.PENDING,
+        )
+        db.add(payment)
+        db.flush()
 
-        # 2. Validar que el monto cobrado coincida con el importe de la reserva
-        paid_amount = Decimal(str(mp_payment.get("transaction_amount", 0)))
-        if paid_amount < payment.amount:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Importe insuficiente: pagado {paid_amount}, requerido {payment.amount}",
-            )
-
-    # Proteccion contra regresiones de estado:
-    # Un pago que ya fue APROBADO o LIBERADO no puede retroceder a pendiente o cancelado por un webhook viejo
-    if payment.status in FINAL_OR_PROTECTED_STATUSES and new_status not in (
-        PaymentStatus.APPROVED,
-        PaymentStatus.REFUNDED,
-        PaymentStatus.RELEASED,
-        PaymentStatus.DISPUTED,
-    ):
+    # Protección contra regresión de estados finales
+    if payment.status in (PaymentStatus.RELEASED, PaymentStatus.DISPUTED):
+        logger.info("Pago %s ya en estado final %s. No se modifica.", payment.id, payment.status.value)
         return payment
 
-    payment.mp_payment_id = str(mp_payment.get("id"))
-    payment.mp_status_detail = mp_payment.get("status_detail")
-    payment.status = new_status
+    payment.mp_payment_id = str(mp_payment_id)
+    now = datetime.now(timezone.utc)
 
-    if new_status == PaymentStatus.APPROVED and payment.approved_at is None:
-        payment.approved_at = datetime.now(timezone.utc)
+    if mp_status == "approved":
+        if transaction_amount < booking.agreed_price:
+            logger.error(
+                "Monto insuficiente en pago %s: cobrado %s, requerido %s",
+                mp_payment_id, transaction_amount, booking.agreed_price
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El importe cobrado no cubre el total de la reserva",
+            )
+
+        payment.status = PaymentStatus.APPROVED
+        payment.approved_at = now
+        logger.info("Pago %s aprobado exitosamente para reserva %s", payment.id, booking_id)
+
+    elif mp_status in ("rejected", "cancelled"):
+        if payment.status != PaymentStatus.APPROVED:
+            payment.status = PaymentStatus.REJECTED
 
     db.commit()
     db.refresh(payment)

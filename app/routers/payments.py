@@ -1,60 +1,69 @@
+import logging
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import get_current_user, require_admin_or_cron, require_role
+from app.core.security import get_current_user
+from app.models.booking import Booking, BookingStatus
 from app.models.payment import Payment, PaymentStatus
-from app.models.user import User, UserRole
-from app.models.booking import Booking
+from app.models.user import User
 from app.schemas.payment import (
-    PaymentDisputeRequest,
-    PaymentResolveRequest,
+    EscrowReleaseResponse,
+    PaymentInitResponse,
     PaymentResponse,
 )
 from app.services.escrow import (
-    confirm_delivery,
-    open_dispute,
+    dispute_escrow,
+    get_payment_by_booking,
+    release_escrow,
     release_expired_payments,
-    release_payment,
-    resolve_dispute,
 )
 from app.services.mercadopago import (
     create_checkout,
     sync_payment_from_mp,
-    verify_mercadopago_signature,
 )
 
-
+logger = logging.getLogger("woffygo.payments")
 router = APIRouter(prefix="/payments", tags=["payments"])
 
 
-@router.post(
-    "/checkout/{booking_id}",
-    response_model=PaymentResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-def start_checkout(
+@router.post("/checkout/{booking_id}", response_model=PaymentInitResponse, status_code=status.HTTP_201_CREATED)
+def init_checkout(
     booking_id: int,
-    current_user: User = Depends(require_role(UserRole.OWNER)),
     db: Session = Depends(get_db),
-) -> Payment:
-    booking = db.get(Booking, booking_id)
-    if booking is None:
+    current_user: User = Depends(get_current_user),
+):
+    booking = db.query(Booking).filter(Booking.id == booking_id).first()
+    if not booking:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Reserva no encontrada",
         )
-    return create_checkout(db, booking, current_user)
+
+    if booking.owner_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No autorizado para pagar esta reserva",
+        )
+
+    if booking.status not in (BookingStatus.REQUESTED, BookingStatus.ACCEPTED):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"No se puede pagar una reserva en estado {booking.status}",
+        )
+
+    return create_checkout(db, booking)
 
 
 @router.get("/{booking_id}", response_model=PaymentResponse)
-def get_payment_by_booking(
+def get_payment_status(
     booking_id: int,
-    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> Payment:
-    booking = db.get(Booking, booking_id)
-    if booking is None:
+    current_user: User = Depends(get_current_user),
+):
+    booking = db.query(Booking).filter(Booking.id == booking_id).first()
+    if not booking:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Reserva no encontrada",
@@ -62,73 +71,21 @@ def get_payment_by_booking(
 
     is_owner = booking.owner_id == current_user.id
     is_provider = booking.provider_id == current_user.id
-    is_admin = current_user.role == UserRole.ADMIN
+    is_admin = current_user.role.value == "admin"
+
     if not (is_owner or is_provider or is_admin):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="No tienes acceso al pago de esta reserva",
+            detail="No autorizado para ver este pago",
         )
 
-    payment = db.query(Payment).filter(Payment.booking_id == booking_id).first()
-    if payment is None:
+    payment = get_payment_by_booking(db, booking_id)
+    if not payment:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Esta reserva no tiene pago iniciado",
+            detail="No hay registro de pago para esta reserva",
         )
     return payment
-
-
-@router.post("/{payment_id}/confirm", response_model=PaymentResponse)
-def confirm_payment(
-    payment_id: int,
-    current_user: User = Depends(require_role(UserRole.OWNER)),
-    db: Session = Depends(get_db),
-) -> Payment:
-    return confirm_delivery(db, payment_id, current_user)
-
-
-@router.post("/{payment_id}/dispute", response_model=PaymentResponse)
-def dispute_payment(
-    payment_id: int,
-    payload: PaymentDisputeRequest,
-    current_user: User = Depends(require_role(UserRole.OWNER)),
-    db: Session = Depends(get_db),
-) -> Payment:
-    return open_dispute(db, payment_id, current_user, payload.reason)
-
-
-@router.post("/admin/{payment_id}/resolve", response_model=PaymentResponse)
-def admin_resolve_payment(
-    payment_id: int,
-    payload: PaymentResolveRequest,
-    current_user: User = Depends(require_role(UserRole.ADMIN)),
-    db: Session = Depends(get_db),
-) -> Payment:
-    return resolve_dispute(
-        db,
-        payment_id,
-        current_user,
-        payload.release_to_walker,
-        payload.resolution_note,
-    )
-
-
-@router.post("/admin/release-expired")
-def admin_release_expired(
-    current_user: User | None = Depends(require_admin_or_cron),
-    db: Session = Depends(get_db),
-) -> dict:
-    ids = release_expired_payments(db)
-    return {"released_ids": ids, "count": len(ids)}
-
-
-@router.post("/admin/{payment_id}/release", response_model=PaymentResponse)
-def admin_release_payment(
-    payment_id: int,
-    current_user: User = Depends(require_role(UserRole.ADMIN)),
-    db: Session = Depends(get_db),
-) -> Payment:
-    return release_payment(db, payment_id)
 
 
 @router.post("/webhook")
@@ -136,68 +93,126 @@ async def mercadopago_webhook(
     request: Request,
     db: Session = Depends(get_db),
 ) -> dict:
+    """
+    Webhook robusto de Mercado Pago.
+    Actúa como trigger: extrae el ID del recurso y consulta directamente 
+    a la API de Mercado Pago con el Access Token privado del servidor 
+    para validar autenticidad, moneda, monto y estado real.
+    """
     payload: dict = {}
     try:
-        if request.headers.get("content-type", "").startswith("application/json"):
-            payload = await request.json()
+        payload = await request.json()
     except Exception:
         payload = {}
 
-    topic = (
-        payload.get("type")
-        or payload.get("topic")
-        or request.query_params.get("type")
-        or request.query_params.get("topic")
-    )
+    params = dict(request.query_params)
+    
+    # Extraer payment ID según todas las variantes posibles de Mercado Pago
     data_id = (
         (payload.get("data") or {}).get("id")
-        or request.query_params.get("data.id")
-        or request.query_params.get("id")
+        or payload.get("id")
+        or params.get("data.id")
+        or params.get("id")
+    )
+    
+    topic = (
+        payload.get("type") 
+        or payload.get("topic") 
+        or params.get("type") 
+        or params.get("topic")
     )
 
-    if topic != "payment" or not data_id:
-        return {"status": "ignored", "reason": "no es un evento de pago"}
+    if not data_id:
+        return {"status": "ignored", "reason": "no_data_id"}
 
-    # Validacion criptografica de firma HMAC
-    x_signature = request.headers.get("x-signature")
-    x_request_id = request.headers.get("x-request-id")
-    if not verify_mercadopago_signature(x_signature, x_request_id, str(data_id)):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Firma de webhook de Mercado Pago invalida",
-        )
+    # Ignorar merchant_order u otros tópicos que no impactan directamente el pago
+    if topic and topic not in ("payment", "payment.created", "payment.updated"):
+        return {"status": "ignored", "reason": f"topic_{topic}"}
 
     try:
-        sync_payment_from_mp(db, str(data_id))
+        payment = sync_payment_from_mp(db, str(data_id))
+        return {
+            "status": "processed", 
+            "payment_id": payment.id, 
+            "payment_status": payment.status.value,
+            "booking_id": payment.booking_id
+        }
     except HTTPException as e:
+        logger.error("Error validando pago %s contra API de Mercado Pago: %s", data_id, e.detail)
         return {"status": "error", "detail": e.detail}
-
-    return {"status": "ok"}
+    except Exception as e:
+        logger.exception("Error inesperado procesando webhook para pago %s: %s", data_id, e)
+        return {"status": "error", "detail": str(e)}
 
 
 @router.get("/return/success")
-def return_success(
+def payment_success_return(
     booking_id: int = Query(...),
-    payment_id: str | None = Query(default=None),
-    status_param: str | None = Query(default=None, alias="status"),
+    payment_id: Optional[str] = Query(None),
+    collection_id: Optional[str] = Query(None),
     db: Session = Depends(get_db),
-) -> dict:
-    # La URL del navegador nunca confirma el pago por si sola.
-    # Se intenta sincronizar si llego payment_id, pero se informa el estado real en BD.
-    if payment_id:
+):
+    """
+    Retorno del cliente desde la pasarela.
+    Sincroniza de inmediato con la API de Mercado Pago para que 
+    la app no dependa exclusivamente de la latencia del webhook.
+    """
+    mp_id = payment_id or collection_id
+    if mp_id:
         try:
-            sync_payment_from_mp(db, payment_id)
-        except HTTPException:
-            pass
+            sync_payment_from_mp(db, str(mp_id))
+        except Exception as e:
+            logger.warning("Fallo sincronización inmediata en retorno de checkout: %s", e)
 
     payment = db.query(Payment).filter(Payment.booking_id == booking_id).first()
-    real_status = payment.status.value if payment else "desconocido"
-    is_approved = payment is not None and payment.status == PaymentStatus.APPROVED
+    if payment and payment.status in (PaymentStatus.APPROVED, PaymentStatus.RELEASED):
+        return {"result": "success", "booking_id": booking_id, "status": payment.status.value}
 
-    return {
-        "result": "success" if is_approved else "pending",
-        "booking_id": booking_id,
-        "payment_id": payment_id,
-        "payment_status": real_status,
-        "is_approved": is_approved,
-    }
+    status_val = payment.status.value if payment else "pending"
+    return {"result": "pending", "booking_id": booking_id, "status": status_val}
+
+
+@router.post("/release/{booking_id}", response_model=EscrowReleaseResponse)
+def release_payment(
+    booking_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    booking = db.query(Booking).filter(Booking.id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Reserva no encontrada")
+
+    if booking.owner_id != current_user.id and current_user.role.value != "admin":
+        raise HTTPException(status_code=403, detail="Solo el dueño o admin puede liberar el pago")
+
+    return release_escrow(db, booking_id)
+
+
+@router.post("/dispute/{booking_id}", response_model=PaymentResponse)
+def open_dispute(
+    booking_id: int,
+    reason: str = Query(..., min_length=5, max_length=500),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    booking = db.query(Booking).filter(Booking.id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Reserva no encontrada")
+
+    if booking.owner_id != current_user.id and current_user.role.value != "admin":
+        raise HTTPException(status_code=403, detail="No autorizado para abrir disputa")
+
+    return dispute_escrow(db, booking_id, reason)
+
+
+@router.post("/admin/release-expired")
+def trigger_release_expired(
+    hours: int = Query(24, ge=1, le=168),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role.value != "admin":
+        raise HTTPException(status_code=403, detail="Solo administradores")
+
+    count = release_expired_payments(db, hours)
+    return {"released_count": count}
