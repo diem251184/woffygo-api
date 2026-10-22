@@ -41,7 +41,7 @@ class WalkerProfileResponse(BaseModel):
 class WalkerNearbyResult(BaseModel):
     user_id: int
     full_name: str
-    avatar_url: str | None
+    avatar_url: str | None = None
     rating_avg: float
     total_walks: int
     hourly_rate: float
