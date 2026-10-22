@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     CLOUDINARY_CLOUD_NAME: str = ""
     CLOUDINARY_API_KEY: str = ""
     CLOUDINARY_API_SECRET: str = ""
+    MAPBOX_ACCESS_TOKEN: str = ""
 
     PUBLIC_BASE_URL: str = "https://woffygo-api.onrender.com"
 
