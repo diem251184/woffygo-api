@@ -37,3 +37,7 @@ htmlcov/
 Thumbs.db
 # === Temporales del proyecto (nunca subir) ===
 _tmp_*
+
+# Backups de limpieza
+backup_db_*.json
+backup_users_*.json
