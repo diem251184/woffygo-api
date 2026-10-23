@@ -162,29 +162,15 @@ async def mercadopago_webhook(
     x_signature = request.headers.get("x-signature")
     x_request_id = request.headers.get("x-request-id")
     if not verify_mercadopago_signature(x_signature, x_request_id, str(data_id)):
+        # Plan B: Si la firma falla, consultar a MP directamente para evitar perder pagos reales
         try:
-            import hmac as _h, hashlib as _hl
-            from app.core.config import settings as _s
-            _parts = {}
-            for _it in (x_signature or "").split(","):
-                if "=" in _it:
-                    _k, _v = _it.strip().split("=", 1)
-                    _parts[_k] = _v
-            _ts = _parts.get("ts", "")
-            _v1 = _parts.get("v1", "")
-            _man = f"id:{data_id};request-id:{x_request_id or ''};ts:{_ts};"
-            _sec = (getattr(_s, "MERCADOPAGO_WEBHOOK_SECRET", "") or "").strip()
-            _sec_fp = _hl.sha256(_sec.encode("utf-8")).hexdigest()[:12]
-            _calc = _h.new(_sec.encode("utf-8"), _man.encode("utf-8"), _hl.sha256).hexdigest()
-            _qid = request.query_params.get("data.id")
-            _bid = (payload.get("data") or {}).get("id")
-            print(f"[webhook-diag] qid={_qid} bid={_bid} req_id={x_request_id} sec_fp={_sec_fp} manifest={_man} v1_pref={_v1[:6]} calc_pref={_calc[:6]}")
-        except Exception as _e:
-            print(f"[webhook-diag] error: {_e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Firma de webhook de Mercado Pago invalida",
-        )
+            sync_payment_from_mp(db, str(data_id))
+            return {"status": "processed_via_fallback"}
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Firma de webhook de Mercado Pago invalida y fallo la reconciliacion",
+            )
 
     try:
         sync_payment_from_mp(db, str(data_id))
