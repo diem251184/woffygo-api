@@ -176,7 +176,9 @@ async def mercadopago_webhook(
             _sec = (getattr(_s, "MERCADOPAGO_WEBHOOK_SECRET", "") or "").strip()
             _sec_fp = _hl.sha256(_sec.encode("utf-8")).hexdigest()[:12]
             _calc = _h.new(_sec.encode("utf-8"), _man.encode("utf-8"), _hl.sha256).hexdigest()
-            print(f"[webhook-diag] qid={data_id} sec_fp={_sec_fp} manifest={_man} v1_pref={_v1[:6]} calc_pref={_calc[:6]}")
+            _qid = request.query_params.get("data.id")
+            _bid = (payload.get("data") or {}).get("id")
+            print(f"[webhook-diag] qid={_qid} bid={_bid} req_id={x_request_id} sec_fp={_sec_fp} manifest={_man} v1_pref={_v1[:6]} calc_pref={_calc[:6]}")
         except Exception as _e:
             print(f"[webhook-diag] error: {_e}")
         raise HTTPException(
