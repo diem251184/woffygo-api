@@ -146,7 +146,11 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
         pickup_location=_make_point(payload.pickup_latitude, payload.pickup_longitude),
         pickup_address=payload.pickup_address,
         duration_minutes=payload.duration_minutes,
-        notes=payload.notes,
+        notes=(
+            f"Destino: {payload.dropoff_address}" + (f" | {payload.notes}" if payload.notes else "")
+            if payload.service_type == ServiceType.TRANSPORT and payload.dropoff_address
+            else payload.notes
+        ),
         price_total=price_total,
         platform_fee=Decimal("0.00"),
         provider_earnings=Decimal("0.00"),
