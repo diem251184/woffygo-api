@@ -130,8 +130,14 @@ def list_mine(
         query = query.filter(Booking.service_type == service_type)
 
     bookings = query.order_by(Booking.created_at.desc()).all()
+    from app.services.bookings import get_platform_fee_rate
+    from decimal import Decimal
+    fee_rate = get_platform_fee_rate(profile.total_walks)
     for b in bookings:
         _attach_extra_fields(db, b)
+        # Calcular ganancia estimada para mostrar en el radar antes de aceptar
+        fee = (b.price_total * fee_rate).quantize(Decimal("0.01"))
+        b.provider_earnings = b.price_total - fee
     return bookings
 
 
@@ -170,8 +176,14 @@ def list_available(
         .order_by(Booking.created_at.asc())
         .all()
     )
+    from app.services.bookings import get_platform_fee_rate
+    from decimal import Decimal
+    fee_rate = get_platform_fee_rate(profile.total_walks)
     for b in bookings:
         _attach_extra_fields(db, b)
+        # Calcular ganancia estimada para mostrar en el radar antes de aceptar
+        fee = (b.price_total * fee_rate).quantize(Decimal("0.01"))
+        b.provider_earnings = b.price_total - fee
     return bookings
 
 

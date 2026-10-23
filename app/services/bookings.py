@@ -44,9 +44,7 @@ def _make_point(latitude: float, longitude: float) -> WKTElement:
 
 
 def get_platform_fee_rate(total_completed: int) -> Decimal:
-    for min_w, max_w, rate in COMMISSION_TIERS:
-        if min_w <= total_completed < max_w:
-            return rate
+    # Comision plana del 15% por decision comercial (23/10/2026)
     return Decimal("0.15")
 
 
