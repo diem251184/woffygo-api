@@ -49,7 +49,7 @@ def create_review(
 
     if walk.owner_id != owner.id:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Solo el duenio del paseo puede dejar una review",
         )
 
@@ -59,10 +59,11 @@ def create_review(
             detail=f"Solo se pueden calificar paseos completados. Estado actual: {walk.status.value}",
         )
 
-    if walk.walker_id is None:
+    target_walker_id = getattr(walk, "walker_id", getattr(walk, "provider_id", None))
+    if target_walker_id is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="El paseo no tiene paseador asignado",
+            detail="El paseo no tiene paseador/proveedor asignado",
         )
 
     existing = db.query(Review).filter(Review.walk_id == walk_id).first()
@@ -75,7 +76,7 @@ def create_review(
     review = Review(
         walk_id=walk_id,
         owner_id=owner.id,
-        walker_id=walk.walker_id,
+        walker_id=target_walker_id,
         rating=payload.rating,
         comment=payload.comment,
     )
@@ -83,7 +84,7 @@ def create_review(
     db.commit()
     db.refresh(review)
 
-    _recalculate_walker_rating(db, walk.walker_id)
+    _recalculate_walker_rating(db, target_walker_id)
     return review
 
 
@@ -101,7 +102,7 @@ def get_review_by_walk(db: Session, walk_id: int, user: User) -> Review | None:
 
     if not (is_owner or is_walker or is_admin):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="No tenes acceso a las reviews de este paseo",
         )
 
@@ -120,3 +121,4 @@ def list_walker_reviews(
         .limit(limit)
         .all()
     )
+

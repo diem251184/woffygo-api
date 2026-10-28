@@ -48,7 +48,7 @@ def _get_walk_or_404(db: Session, walk_id: int):
 def _ensure_participant(walk: Walk, user: User) -> None:
     """Valida que el user sea duenio o paseador del paseo (o admin)."""
     is_owner = walk.owner_id == user.id
-    is_walker = walk.walker_id == user.id
+    is_walker = walk.provider_id == user.id
     is_admin = user.role == UserRole.ADMIN
     if not (is_owner or is_walker or is_admin):
         raise HTTPException(
@@ -91,9 +91,9 @@ def send_message(
     # Notificar al receptor del mensaje (no al que lo envia)
     try:
         recipient_id: int | None = None
-        if current_user.id == walk.owner_id and walk.walker_id is not None:
-            recipient_id = walk.walker_id
-        elif current_user.id == walk.walker_id:
+        if current_user.id == walk.owner_id and walk.provider_id is not None:
+            recipient_id = walk.provider_id
+        elif current_user.id == walk.provider_id:
             recipient_id = walk.owner_id
 
         if recipient_id is not None:

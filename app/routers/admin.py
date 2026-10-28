@@ -54,7 +54,7 @@ def get_walk_verification(
     return WalkVerificationDetail(
         walk_id=walk.id,
         owner_id=walk.owner_id,
-        walker_id=walk.walker_id,
+        walker_id=walk.provider_id,
         status=walk.status.value,
         started_at=walk.started_at,
         finished_at=walk.finished_at,
@@ -174,7 +174,7 @@ def get_user_detail(
     # Contadores
     pets_count = db.query(Pet).filter(Pet.owner_id == user.id).count()
     walks_as_owner = db.query(Walk).filter(Walk.owner_id == user.id).count()
-    walks_as_walker = db.query(Walk).filter(Walk.walker_id == user.id).count()
+    walks_as_walker = db.query(Walk).filter(Walk.provider_id == user.id).count()
 
     # Perfil walker
     wp_info = None

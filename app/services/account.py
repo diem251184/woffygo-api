@@ -20,7 +20,7 @@ def delete_account(db: Session, user: User) -> None:
     active_walks = (
         db.query(Walk)
         .filter(
-            (Walk.owner_id == user.id) | (Walk.walker_id == user.id)
+            (Walk.owner_id == user.id) | (Walk.provider_id == user.id)
         )
         .filter(Walk.status.in_(ACTIVE_WALK_STATUSES))
         .count()
