@@ -106,7 +106,10 @@ def verify_mercadopago_signature(
     ):
         return False
 
-    manifest = f"id:{data_id};request-id:{x_request_id or ''};ts:{ts};"
+    manifest = f"id:{data_id};"
+    if x_request_id:
+        manifest += f"request-id:{x_request_id};"
+    manifest += f"ts:{ts};"
     computed = hmac.new(
         secret.encode("utf-8"),
         manifest.encode("utf-8"),

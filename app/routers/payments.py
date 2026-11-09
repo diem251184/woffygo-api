@@ -165,8 +165,8 @@ async def mercadopago_webhook(
         or request.query_params.get("topic")
     )
     data_id = (
-        (payload.get("data") or {}).get("id")
-        or request.query_params.get("data.id")
+        request.query_params.get("data.id")
+        or (payload.get("data") or {}).get("id")
         or request.query_params.get("id")
     )
 
