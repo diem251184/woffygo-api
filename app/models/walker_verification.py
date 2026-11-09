@@ -1,5 +1,5 @@
-﻿import enum
-from datetime import datetime
+import enum
+from datetime import datetime, date
 
 from sqlalchemy import (
     DateTime,
@@ -7,6 +7,7 @@ from sqlalchemy import (
     ForeignKey,
     String,
     Text,
+    Date,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -18,6 +19,13 @@ class WalkerVerificationStatus(str, enum.Enum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+
+class DocumentStatus(str, enum.Enum):
+    MISSING = "missing"
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
 
 
 class WalkerVerification(Base):
@@ -31,10 +39,42 @@ class WalkerVerification(Base):
         index=True,
     )
 
-    dni_front_url: Mapped[str] = mapped_column(String(500), nullable=False)
-    dni_back_url: Mapped[str] = mapped_column(String(500), nullable=False)
-    selfie_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    # --- BLOQUE IDENTIDAD ---
+    identity_status: Mapped[DocumentStatus] = mapped_column(
+        SQLEnum(DocumentStatus, name="document_status", values_callable=lambda x: [e.value for e in x]), default=DocumentStatus.MISSING, nullable=False
+    )
+    dni_front_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    dni_back_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    selfie_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    identity_rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # --- BLOQUE LICENCIA (Solo Pet Taxi) ---
+    license_status: Mapped[DocumentStatus] = mapped_column(
+        SQLEnum(DocumentStatus, name="document_status", values_callable=lambda x: [e.value for e in x]), default=DocumentStatus.MISSING, nullable=False
+    )
+    license_number: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    license_class: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    license_jurisdiction: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    license_expiration: Mapped[date | None] = mapped_column(Date, nullable=True)
+    license_front_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    license_back_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    license_rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # --- BLOQUE VEHÍCULO (Solo Pet Taxi) ---
+    vehicle_status: Mapped[DocumentStatus] = mapped_column(
+        SQLEnum(DocumentStatus, name="document_status", values_callable=lambda x: [e.value for e in x]), default=DocumentStatus.MISSING, nullable=False
+    )
+    vehicle_plate: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    vehicle_brand: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    vehicle_model: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    vehicle_year: Mapped[int | None] = mapped_column(nullable=True)
+    vehicle_photo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    vehicle_cedula_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    vehicle_insurance_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    vehicle_inspection_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    vehicle_rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # --- ESTADO GLOBAL Y AUDITORÍA ---
     status: Mapped[WalkerVerificationStatus] = mapped_column(
         SQLEnum(WalkerVerificationStatus, name="walker_verification_status"),
         nullable=False,

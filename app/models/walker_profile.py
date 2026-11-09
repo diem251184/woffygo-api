@@ -18,6 +18,14 @@ class WalkerProfile(Base):
     hourly_rate: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=0)
     search_radius_km: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     is_online: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    accepts_special_needs: Mapped[bool] = mapped_column(nullable=False, default=False, server_default='false')
+    accepts_ppp: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    accepts_cats: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+
     current_location: Mapped[str | None] = mapped_column(
         Geography(geometry_type="POINT", srid=4326), nullable=True
     )

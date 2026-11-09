@@ -6,6 +6,10 @@ from app.models.booking import Booking, BookingPet, BookingStatus, ServiceType
 from app.models.provider_service import ProviderService
 from app.models.walk_location import WalkLocation
 from app.models.payment import Payment, PaymentStatus
+from app.models.payment_status_event import PaymentStatusEvent
+from app.models.payment_attempt import PaymentAttempt
+from app.models.payment_attempt_charge import PaymentAttemptCharge
+from app.models.payment_refund_request import PaymentRefundRequest
 from app.models.message import Message
 from app.models.review import Review
 from app.models.device_token import DeviceToken
@@ -31,6 +35,10 @@ __all__ = [
     "WalkLocation",
     "Payment",
     "PaymentStatus",
+    "PaymentStatusEvent",
+    "PaymentAttempt",
+    "PaymentAttemptCharge",
+    "PaymentRefundRequest",
     "Message",
     "Review",
     "DeviceToken",

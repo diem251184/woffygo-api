@@ -40,6 +40,11 @@ class AdminStats(BaseModel):
     escrow_pending_total: str
     disputed_total: str
 
+    # Indicadores descriptivos; no equivalen a fondos conciliados.
+    released_commissions_historical_total: str = "0.00"
+    refunded_amount_total: str = "0.00"
+    chargeback_amount_total: str = "0.00"
+
     # Moderacion
     flagged_walks: int
     disputed_payments: int

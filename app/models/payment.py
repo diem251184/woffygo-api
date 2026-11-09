@@ -1,10 +1,11 @@
-﻿from datetime import datetime
+from datetime import datetime
 from decimal import Decimal
 import enum
 from sqlalchemy import (
     String,
     DateTime,
     Numeric,
+    Integer,
     ForeignKey,
     Enum as SAEnum,
     func,
@@ -22,6 +23,7 @@ class PaymentStatus(str, enum.Enum):
     CANCELLED = "cancelado"
     RELEASED = "liberado"
     DISPUTED = "en_disputa"
+    CHARGED_BACK = "contracargo"
 
 
 class Payment(Base):
@@ -44,7 +46,7 @@ class Payment(Base):
         index=True,
     )
     mp_preference_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
-    mp_payment_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    mp_payment_id: Mapped[str | None] = mapped_column(String(120), nullable=True, unique=True, index=True)
     mp_status_detail: Mapped[str | None] = mapped_column(String(120), nullable=True)
     init_point: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -66,6 +68,18 @@ class Payment(Base):
         DateTime(timezone=True), nullable=True
     )
     dispute_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    dispute_resolution_note: Mapped[str | None] = mapped_column(
+        String(120), nullable=True
+    )
+    dispute_resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    dispute_resolved_by_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    dispute_resolution_result: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
     released_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

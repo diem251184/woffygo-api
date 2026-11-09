@@ -1,4 +1,4 @@
-﻿from datetime import datetime, date
+from datetime import datetime, date
 from sqlalchemy import String, Boolean, DateTime, Date, Enum as SAEnum, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 import enum
@@ -24,6 +24,7 @@ class User(Base):
         SAEnum(UserRole, name="user_role", values_callable=lambda x: [e.value for e in x]),
         nullable=False,
     )
+    service_type: Mapped[str] = mapped_column(String(50), nullable=False, server_default="walk")
 
     # Foto de perfil del usuario (Dueño / Paseador)
     profile_photo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)

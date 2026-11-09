@@ -47,6 +47,9 @@ class BookingResponse(BaseModel):
     id: int
     owner_id: int
     provider_id: int | None
+    provider_name: str | None = None
+    owner_name: str | None = None
+    cancelled_by_name: str | None = None
     service_type: ServiceType
     status: BookingStatus
     pickup_address: str

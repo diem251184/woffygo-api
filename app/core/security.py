@@ -30,7 +30,7 @@ def create_access_token(subject: str | int, extra: dict[str, Any] | None = None)
 
 def decode_access_token(token: str) -> dict[str, Any] | None:
     try:
-        return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM], options={"require_exp": True})
     except JWTError:
         return None
 

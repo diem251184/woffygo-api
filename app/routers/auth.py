@@ -1,4 +1,4 @@
-﻿from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse
@@ -60,6 +60,7 @@ def register(payload: UserCreate, db: Session = Depends(get_db)) -> User:
         address=payload.address,
         birth_date=payload.birth_date,
         emergency_contact=payload.emergency_contact,
+        service_type=payload.service_type if payload.role == UserRole.WALKER else "walk",
     )
     db.add(user)
     db.commit()

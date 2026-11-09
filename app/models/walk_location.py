@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 from sqlalchemy import Integer, Float, DateTime, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from geoalchemy2 import Geography

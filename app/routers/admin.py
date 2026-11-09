@@ -1,4 +1,8 @@
+from fastapi import Body
 from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Literal
+from pydantic import BaseModel, Field
+import json
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -9,9 +13,15 @@ from app.schemas.admin import FlagClearRequest, WalkVerificationDetail
 from app.schemas.walk import WalkResponse
 from app.services.verification import get_verification_summary
 from app.models.payment import Payment, PaymentStatus
+from app.models.payment_attempt import PaymentAttempt
 from app.models.admin_action import AdminAction
 from app.schemas.admin_action import AdminActionResponse, AdminStats
 from app.services.admin_log import log_action
+from app.services.refund_requests import (
+    prepare_persisted_full_refund,
+    inspect_refund_with_authenticated_mp_lookup,
+)
+from app.services.refund_requests import require_manual_refund_reconciliation_review
 from app.models.safety_report import SafetyReport
 from app.schemas.safety_report import SafetyReportAdminResponse, SafetyReportDeleteRequest
 from sqlalchemy import func as sqlfunc, text
@@ -101,6 +111,188 @@ def clear_walk_flag(
         print(f"[admin_log] Error logueando flag_clear: {_e}")
 
     return walk
+
+
+@router.get("/payments/manual-review")
+def list_payment_manual_reviews(
+    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """Lista intentos financieros pendientes de revision administrativa."""
+    attempts = (
+        db.query(PaymentAttempt)
+        .filter(
+            PaymentAttempt.status.in_(
+                ("manual_review", "duplicate_approved_review")
+            )
+        )
+        .order_by(PaymentAttempt.id.desc())
+        .limit(100)
+        .all()
+    )
+
+    return [
+        {
+            "attempt_id": attempt.id,
+            "payment_id": attempt.payment_id,
+            "review_status": attempt.status,
+        }
+        for attempt in attempts
+    ]
+
+
+class FinancialReviewNoteRequest(BaseModel):
+    decision: Literal[
+        "evidence_requested",
+        "evidence_received",
+        "escalated",
+        "keep_pending",
+    ]
+    evidence_reference: str = Field(min_length=3, max_length=120)
+    reason: str = Field(min_length=10, max_length=200)
+
+
+@router.post("/payments/manual-review/{attempt_id}/note")
+def register_payment_review_note(
+    attempt_id: int,
+    payload: FinancialReviewNoteRequest,
+    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """Documenta una revision sin resolver ni alterar estados financieros."""
+    if attempt_id <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Identificador de intento invalido",
+        )
+
+    reference = payload.evidence_reference.strip()
+    reason = payload.reason.strip()
+
+    if len(reference) < 3 or len(reason) < 10:
+        raise HTTPException(
+            status_code=422,
+            detail="Referencia o motivo insuficiente",
+        )
+
+    attempt = (
+        db.query(PaymentAttempt)
+        .filter(PaymentAttempt.id == attempt_id)
+        .first()
+    )
+
+    if attempt is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Intento financiero no encontrado",
+        )
+
+    if attempt.status not in (
+        "manual_review",
+        "duplicate_approved_review",
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="El intento no tiene una alerta manual pendiente",
+        )
+
+    description = json.dumps(
+        {
+            "decision": payload.decision,
+            "evidence_reference": reference,
+            "reason": reason,
+            "review_status": attempt.status,
+            "payment_id": attempt.payment_id,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+    # AdminAction admite hasta 500 caracteres.
+    # Nunca guardar evidencia truncada.
+    if len(description) > 500:
+        raise HTTPException(
+            status_code=422,
+            detail="Registro excede la capacidad de auditoria",
+        )
+
+    entry = log_action(
+        db=db,
+        admin=current_user,
+        action="payment_review_note",
+        target_type="payment_attempt",
+        target_id=attempt.id,
+        description=description,
+    )
+
+    return {
+        "action_id": entry.id,
+        "attempt_id": attempt.id,
+        "payment_id": attempt.payment_id,
+        "review_status": attempt.status,
+        "decision": payload.decision,
+        "recorded": True,
+        "financial_state_changed": False,
+    }
+
+
+@router.post("/payments/refunds/{request_id}/manual-review")
+def require_admin_refund_manual_review(
+    request_id: int,
+    reason: str = Body(..., embed=True),
+    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Deriva a revision manual; no confirma ni ejecuta devoluciones."""
+    request = require_manual_refund_reconciliation_review(
+        db=db,
+        request_id=request_id,
+        admin=current_user,
+        reason=reason,
+    )
+    return {
+        "request_id": request.id,
+        "status": request.status,
+        "refund_confirmed": False,
+        "refund_executed": False,
+        "requires_manual_verification": True,
+    }
+
+
+@router.get("/payments/refunds/{request_id}/reconciliation-check")
+def inspect_admin_refund_reconciliation(
+    request_id: int,
+    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Consulta evidencia externa; no confirma ni ejecuta reembolsos."""
+    return inspect_refund_with_authenticated_mp_lookup(
+        db=db,
+        request_id=request_id,
+    )
+
+
+@router.post("/payments/{payment_id}/refunds/prepare")
+def prepare_admin_full_refund(
+    payment_id: int,
+    current_user: User = Depends(require_role(UserRole.ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Prepara una solicitud persistente; no envia dinero ni reembolsa."""
+    request = prepare_persisted_full_refund(
+        db=db,
+        payment_id=payment_id,
+        admin=current_user,
+    )
+
+    return {
+        "request_id": request.id,
+        "payment_id": request.payment_id,
+        "mp_payment_id": request.mp_payment_id,
+        "idempotency_key": request.idempotency_key,
+        "status": request.status,
+        "refund_executed": False,
+    }
 
 
 @router.get("/payments/disputed", response_model=list[PaymentResponse])
@@ -329,6 +521,26 @@ def get_admin_stats(
         Payment.status == PaymentStatus.DISPUTED
     ).scalar() or Decimal("0")
 
+    # Indicadores historicos y estados actuales.
+    # No representan movimientos externos conciliados.
+    released_commissions_historical_total = db.query(
+        sqlfunc.coalesce(sqlfunc.sum(Payment.platform_fee), 0)
+    ).filter(
+        Payment.released_at.isnot(None)
+    ).scalar() or Decimal("0")
+
+    refunded_amount_total = db.query(
+        sqlfunc.coalesce(sqlfunc.sum(Payment.amount), 0)
+    ).filter(
+        Payment.status == PaymentStatus.REFUNDED
+    ).scalar() or Decimal("0")
+
+    chargeback_amount_total = db.query(
+        sqlfunc.coalesce(sqlfunc.sum(Payment.amount), 0)
+    ).filter(
+        Payment.status == PaymentStatus.CHARGED_BACK
+    ).scalar() or Decimal("0")
+
     # Moderacion
     flagged_walks = db.query(Walk).filter(Walk.flagged_for_review.is_(True)).count()
     disputed_payments = db.query(Payment).filter(
@@ -354,6 +566,11 @@ def get_admin_stats(
         revenue_this_month=str(revenue_this_month),
         escrow_pending_total=str(escrow_pending_total),
         disputed_total=str(disputed_total),
+        released_commissions_historical_total=str(
+            released_commissions_historical_total
+        ),
+        refunded_amount_total=str(refunded_amount_total),
+        chargeback_amount_total=str(chargeback_amount_total),
         flagged_walks=flagged_walks,
         disputed_payments=disputed_payments,
     )

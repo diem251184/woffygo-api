@@ -53,6 +53,7 @@ app.include_router(app_info.router)
 app.include_router(walker_verifications.router)
 
 
-@app.api_route("/health", methods=["GET", "HEAD"], tags=["health"])
+@app.get("/health", tags=["health"])
+@app.head("/health", include_in_schema=False)
 def health() -> dict:
     return {"status": "ok", "service": "woffygo-api", "version": "0.2.0"}

@@ -1,4 +1,4 @@
-﻿from app.models.booking import Booking, BookingPet, BookingStatus, ServiceType
+from app.models.booking import Booking, BookingPet, BookingStatus, ServiceType
 
 # Herencia directa para que SQLAlchemy registre 'Walk' en su Class Registry
 class Walk(Booking):

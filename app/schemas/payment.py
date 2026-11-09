@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -30,6 +30,12 @@ class PaymentResponse(BaseModel):
     dispute_reason: str | None = None
     released_at: datetime | None = None
 
+
+class PaymentAdminResponse(PaymentResponse):
+    dispute_resolution_note: str | None = None
+    dispute_resolved_at: datetime | None = None
+    dispute_resolved_by_id: int | None = None
+    dispute_resolution_result: str | None = None
 
 class PaymentDisputeRequest(BaseModel):
     reason: str = Field(min_length=10, max_length=500)

@@ -26,12 +26,6 @@ ALLOWED_TRANSITIONS: dict[BookingStatus, set[BookingStatus]] = {
     BookingStatus.REJECTED: set(),
 }
 
-COMMISSION_TIERS = [
-    (0, 10, Decimal("0.20")),
-    (10, 50, Decimal("0.15")),
-    (50, 999999, Decimal("0.12")),
-]
-
 MAX_PETS = 3
 
 
@@ -43,7 +37,7 @@ def _make_point(latitude: float, longitude: float) -> WKTElement:
     return WKTElement(f"POINT({longitude} {latitude})", srid=4326)
 
 
-def get_platform_fee_rate(total_completed: int) -> Decimal:
+def get_platform_fee_rate() -> Decimal:
     # Comision plana del 15% por decision comercial (23/10/2026)
     return Decimal("0.15")
 
@@ -70,7 +64,6 @@ def calculate_quote(
     service_type: ServiceType,
     duration_minutes: int,
     num_pets: int,
-    completed_services: int,
     distance_km: Decimal | None = None,
 ) -> tuple[Decimal, Decimal, Decimal]:
     """Calcula precio total, comision y ganancia segun reglas oficiales del servidor."""
@@ -86,7 +79,7 @@ def calculate_quote(
     else:
         price_total = walk_price(duration_minutes, num_pets)
 
-    fee_rate = get_platform_fee_rate(completed_services)
+    fee_rate = get_platform_fee_rate()
     fee = (price_total * fee_rate).quantize(Decimal("0.01"))
     earnings = price_total - fee
     return price_total, fee, earnings
@@ -110,6 +103,34 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"La mascota '{pet.name}' no te pertenece",
+            )
+
+    if payload.service_type not in (ServiceType.WALK, ServiceType.TRANSPORT):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Solo se permiten reservas de paseo o Pet Taxi.",
+        )
+
+    for pet in pets:
+        if pet.species not in ("dog", "cat"):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"La especie de {pet.name} no esta permitida.",
+            )
+        if payload.service_type == ServiceType.WALK and pet.species != "dog":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Los paseos son exclusivamente para perros.",
+            )
+        if pet.species == "cat" and pet.is_ppp is True:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Revisa la declaracion PPP de {pet.name}.",
+            )
+        if pet.species == "dog" and pet.is_ppp is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Completa la declaracion PPP de {pet.name} antes de reservar.",
             )
 
     num_pets = len(pets)
@@ -227,6 +248,93 @@ def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
             detail="Ya tienes un servicio activo. Debes finalizarlo antes de tomar otro.",
         )
 
+    # Compatibilidad obligatoria entre servicio y prestador.
+    expected_provider_type = (
+        "walk" if booking.service_type == ServiceType.WALK
+        else "transport" if booking.service_type == ServiceType.TRANSPORT
+        else None
+    )
+    if expected_provider_type is None or provider.service_type != expected_provider_type:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="El prestador no esta habilitado para este tipo de servicio.",
+        )
+
+    if not booking.booking_pets:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="La reserva no contiene mascotas.",
+        )
+
+    for association in booking.booking_pets:
+        pet = association.pet
+        if pet is None or pet.species not in ("dog", "cat"):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="La reserva contiene una especie no admitida.",
+            )
+        if booking.service_type == ServiceType.WALK and pet.species != "dog":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Los paseos son exclusivamente para perros.",
+            )
+        if pet.has_special_needs and not profile.accepts_special_needs:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="El prestador no acepta mascotas con necesidades especiales.",
+            )
+        if pet.species == "cat":
+            if pet.is_ppp is True:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="La declaracion PPP de la mascota es incompatible.",
+                )
+            if not profile.accepts_cats:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="El prestador no acepta traslados de gatos.",
+                )
+        if pet.species == "dog":
+            if pet.is_ppp is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="La mascota requiere una declaracion PPP.",
+                )
+            if pet.is_ppp is True and not profile.accepts_ppp:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="El prestador no acepta perros declarados PPP.",
+                )
+
+    # Cobertura obligatoria antes de aceptar un paseo.
+    if booking.service_type == ServiceType.WALK:
+        within_coverage = db.execute(
+            text(
+                """
+                SELECT ST_DWithin(
+                    wp.current_location,
+                    b.pickup_location,
+                    LEAST(wp.search_radius_km, :max_radius_km) * 1000
+                )
+                FROM walker_profiles wp
+                JOIN bookings b ON b.id = :booking_id
+                WHERE wp.user_id = :provider_id
+                  AND wp.current_location IS NOT NULL
+                  AND wp.search_radius_km > 0
+                """
+            ),
+            {
+                "booking_id": booking.id,
+                "provider_id": provider.id,
+                "max_radius_km": WALK_MAX_RADIUS_KM,
+            },
+        ).scalar()
+        if within_coverage is not True:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="La solicitud esta fuera de tu cobertura o no tenes ubicacion disponible.",
+            )
+
     num_pets = len(booking.booking_pets)
     dist_km = (booking.distance_meters / Decimal("1000")) if booking.distance_meters else None
 
@@ -234,7 +342,6 @@ def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
         booking.service_type,
         booking.duration_minutes,
         num_pets,
-        profile.total_walks,
         dist_km,
     )
 
@@ -354,6 +461,10 @@ def notify_nearby_providers_new_booking(db: Session, booking: Booking, pets: lis
         JOIN users u ON u.id = wp.user_id
         WHERE wp.is_online = true
           AND u.is_active = true
+          AND u.service_type = :provider_service_type
+          AND (:has_cats = false OR wp.accepts_cats = true)
+          AND (:has_ppp = false OR wp.accepts_ppp = true)
+          AND (:has_special_needs = false OR wp.accepts_special_needs = true)
           AND (
               :is_transport = true
               OR (
@@ -372,6 +483,10 @@ def notify_nearby_providers_new_booking(db: Session, booking: Booking, pets: lis
         {
             "booking_id": booking.id,
             "is_transport": is_transport,
+            "provider_service_type": "transport" if is_transport else "walk",
+            "has_cats": any(p.species == "cat" for p in pets),
+            "has_ppp": any(p.species == "dog" and p.is_ppp is True for p in pets),
+            "has_special_needs": any(p.has_special_needs is True for p in pets),
             "walk_max_radius_km": WALK_MAX_RADIUS_KM,
         },
     ).all()

@@ -1,4 +1,4 @@
-﻿from geoalchemy2.shape import to_shape
+from geoalchemy2.shape import to_shape
 from geoalchemy2.elements import WKTElement
 from app.models.walk_location import WalkLocation
 

@@ -9,6 +9,7 @@ from app.models.booking import Booking
 from app.schemas.payment import (
     PaymentDisputeRequest,
     PaymentResolveRequest,
+    PaymentAdminResponse,
     PaymentResponse,
 )
 from app.services.escrow import (
@@ -75,6 +76,20 @@ def get_payment_by_booking(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Esta reserva no tiene pago iniciado",
         )
+    if current_user.role == UserRole.WALKER:
+        from fastapi.responses import JSONResponse
+
+        safe_payment = PaymentResponse.model_validate(payment).model_dump(
+            mode="json",
+            include={
+                "id", "booking_id", "walk_id",
+                "walker_earnings", "status",
+                "created_at", "updated_at",
+                "approved_at", "released_at",
+            },
+        )
+        return JSONResponse(content=safe_payment)
+
     return payment
 
 
@@ -97,7 +112,7 @@ def dispute_payment(
     return open_dispute(db, payment_id, current_user, payload.reason)
 
 
-@router.post("/admin/{payment_id}/resolve", response_model=PaymentResponse)
+@router.post("/admin/{payment_id}/resolve", response_model=PaymentAdminResponse)
 def admin_resolve_payment(
     payment_id: int,
     payload: PaymentResolveRequest,
@@ -162,20 +177,23 @@ async def mercadopago_webhook(
     x_signature = request.headers.get("x-signature")
     x_request_id = request.headers.get("x-request-id")
     if not verify_mercadopago_signature(x_signature, x_request_id, str(data_id)):
-        # Plan B: Si la firma falla, consultar a MP directamente para evitar perder pagos reales
-        try:
-            sync_payment_from_mp(db, str(data_id))
-            return {"status": "processed_via_fallback"}
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Firma de webhook de Mercado Pago invalida y fallo la reconciliacion",
-            )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Firma de webhook de Mercado Pago invalida o no configurada",
+        )
 
     try:
         sync_payment_from_mp(db, str(data_id))
     except HTTPException as e:
-        return {"status": "error", "detail": e.detail}
+        if e.status_code >= 500:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No se pudo sincronizar temporalmente el pago",
+            ) from e
+        raise HTTPException(
+            status_code=e.status_code,
+            detail="No se pudo validar el pago notificado",
+        ) from e
 
     return {"status": "ok"}
 
@@ -185,24 +203,13 @@ def return_success(
     booking_id: int = Query(...),
     payment_id: str | None = Query(default=None),
     status_param: str | None = Query(default=None, alias="status"),
-    db: Session = Depends(get_db),
 ) -> dict:
-    # La URL del navegador nunca confirma el pago por si sola.
-    # Se intenta sincronizar si llego payment_id, pero se informa el estado real en BD.
-    if payment_id:
-        try:
-            sync_payment_from_mp(db, payment_id)
-        except HTTPException:
-            pass
-
-    payment = db.query(Payment).filter(Payment.booking_id == booking_id).first()
-    real_status = payment.status.value if payment else "desconocido"
-    is_approved = payment is not None and payment.status == PaymentStatus.APPROVED
-
+    # Retorno publico: no autentica ni confirma pagos.
+    # El estado verdadero se consulta desde la app autenticada.
     return {
-        "result": "success" if is_approved else "pending",
+        "result": "pending",
         "booking_id": booking_id,
         "payment_id": payment_id,
-        "payment_status": real_status,
-        "is_approved": is_approved,
+        "payment_status": "consultar_en_app",
+        "is_approved": False,
     }

@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 from sqlalchemy import String, DateTime, ForeignKey, func, Float, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -13,6 +13,15 @@ class Pet(Base):
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(String(80), nullable=False)
+    species: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="dog", server_default="dog"
+    )
+    has_special_needs: Mapped[bool] = mapped_column(nullable=False, default=False, server_default='false')
+    is_ppp: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True, default=None
+    )
+
+    sex: Mapped[str | None] = mapped_column(String(10), nullable=True)
     breed: Mapped[str | None] = mapped_column(String(80), nullable=True)
     age_years: Mapped[int | None] = mapped_column(nullable=True)
     notes: Mapped[str | None] = mapped_column(String(500), nullable=True)

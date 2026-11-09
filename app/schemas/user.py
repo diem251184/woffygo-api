@@ -1,4 +1,5 @@
-﻿from datetime import datetime, date
+from datetime import datetime, date
+from typing import Literal
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from app.models.user import UserRole
 
@@ -16,6 +17,7 @@ class UserCreate(UserBase):
     address: str | None = None
     birth_date: date | None = None
     emergency_contact: str | None = None
+    service_type: Literal["walk", "transport"] = "walk"
 
 
 class UserLogin(BaseModel):
@@ -41,6 +43,7 @@ class UserResponse(BaseModel):
     full_name: str
     phone: str
     role: UserRole
+    service_type: str
     profile_photo_url: str | None = None
     dni_number: str | None = None
     address: str | None = None

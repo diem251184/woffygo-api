@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 import enum
 from sqlalchemy import String, DateTime, ForeignKey, Enum as SAEnum, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship

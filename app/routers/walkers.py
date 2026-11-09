@@ -46,6 +46,18 @@ def create_profile(
     current_user: User = Depends(require_role(UserRole.WALKER)),
     db: Session = Depends(get_db),
 ) -> WalkerProfile:
+    if current_user.service_type == "walk" and payload.search_radius_km > 6:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="El radio de cobertura para paseos no puede superar 6 km.",
+        )
+
+    if payload.accepts_cats and current_user.service_type != "transport":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Solo los prestadores de Pet Taxi pueden aceptar gatos.",
+        )
+
     existing = (
         db.query(WalkerProfile).filter(WalkerProfile.user_id == current_user.id).first()
     )
@@ -58,6 +70,9 @@ def create_profile(
         user_id=current_user.id,
         bio=payload.bio,
         hourly_rate=WALK_HOURLY_RATE,
+        accepts_ppp=payload.accepts_ppp,
+        accepts_special_needs=payload.accepts_special_needs,
+        accepts_cats=payload.accepts_cats,
         search_radius_km=payload.search_radius_km,
     )
     db.add(profile)
@@ -80,11 +95,40 @@ def update_my_profile(
     current_user: User = Depends(require_role(UserRole.WALKER)),
     db: Session = Depends(get_db),
 ) -> WalkerProfile:
+    for field in ("accepts_ppp", "accepts_cats", "accepts_special_needs"):
+        if field in payload.model_fields_set and getattr(payload, field) is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"La preferencia {field} debe ser true o false.",
+            )
+
+    if (
+        current_user.service_type == "walk"
+        and payload.search_radius_km is not None
+        and payload.search_radius_km > 6
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="El radio de cobertura para paseos no puede superar 6 km.",
+        )
+
+    if payload.accepts_cats is True and current_user.service_type != "transport":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Solo los prestadores de Pet Taxi pueden aceptar gatos.",
+        )
+
     profile = _get_or_404_profile(db, current_user)
     if payload.bio is not None:
         profile.bio = payload.bio
     if payload.search_radius_km is not None:
         profile.search_radius_km = payload.search_radius_km
+    if "accepts_ppp" in payload.model_fields_set:
+        profile.accepts_ppp = payload.accepts_ppp
+    if "accepts_cats" in payload.model_fields_set:
+        profile.accepts_cats = payload.accepts_cats
+    if "accepts_special_needs" in payload.model_fields_set:
+        profile.accepts_special_needs = payload.accepts_special_needs
     db.commit()
     db.refresh(profile)
     return profile

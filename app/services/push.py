@@ -1,4 +1,4 @@
-﻿"""Servicio de envio de notificaciones push via Expo Push API.
+"""Servicio de envio de notificaciones push via Expo Push API.
 
 Expo Push API:
 - Endpoint: https://exp.host/--/api/v2/push/send
@@ -56,8 +56,6 @@ def _send_batch(messages: list[dict]) -> list[dict]:
     """Envia hasta 100 mensajes a Expo Push API. Devuelve la lista de resultados."""
     if not messages:
         return []
-    import json as _json
-    print(f"[push] Payload a enviar: {_json.dumps(messages)}")
     payload = messages[0] if len(messages) == 1 else messages
     try:
         with httpx.Client(timeout=15.0) as client:

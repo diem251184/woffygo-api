@@ -9,7 +9,7 @@ PET_MULTIPLIERS = [Decimal("1.00"), Decimal("0.75"), Decimal("0.50")]
 # Pet Taxi
 TRANSPORT_BASE_FEE = Decimal("3500.00")
 TRANSPORT_KM_FEE = Decimal("500.00")
-TRANSPORT_MIN_PRICE = Decimal("500.00")
+TRANSPORT_MIN_PRICE = Decimal("5000.00")
 TRANSPORT_EXTRA_PET_FEE = Decimal("1500.00")
 
 
@@ -43,10 +43,10 @@ def transport_price(distance_km: Decimal, num_pets: int) -> Decimal:
     # Asegurar 2 decimales exactos en los kilómetros
     km_exact = distance_km.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     base_calc = TRANSPORT_BASE_FEE + (km_exact * TRANSPORT_KM_FEE)
-    price_base = max(Decimal("5000.00"), base_calc)
+    price_base = max(TRANSPORT_MIN_PRICE, base_calc)
 
     extra_pets = max(0, num_pets - 1)
     extra_pets_fee = Decimal(extra_pets) * TRANSPORT_EXTRA_PET_FEE
 
     total = price_base + extra_pets_fee
-    return total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return total.quantize(Decimal("1"), rounding=ROUND_HALF_UP)

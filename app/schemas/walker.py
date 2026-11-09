@@ -6,11 +6,17 @@ from pydantic import BaseModel, Field
 class WalkerProfileCreate(BaseModel):
     bio: str | None = Field(default=None, max_length=500)
     search_radius_km: int = Field(default=5, ge=1, le=50)
+    accepts_special_needs: bool = False
+    accepts_ppp: bool = False
+    accepts_cats: bool = False
 
 
 class WalkerProfileUpdate(BaseModel):
     bio: str | None = Field(default=None, max_length=500)
     search_radius_km: int | None = Field(default=None, ge=1, le=50)
+    accepts_special_needs: bool | None = None
+    accepts_ppp: bool | None = None
+    accepts_cats: bool | None = None
 
 
 class WalkerLocationUpdate(BaseModel):
@@ -29,6 +35,9 @@ class WalkerProfileResponse(BaseModel):
     hourly_rate: Decimal
     search_radius_km: int
     is_online: bool
+    accepts_special_needs: bool
+    accepts_ppp: bool
+    accepts_cats: bool
     rating_avg: Decimal
     total_walks: int
     created_at: datetime

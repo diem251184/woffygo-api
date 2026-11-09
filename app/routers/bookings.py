@@ -65,11 +65,12 @@ def quote(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    completed_services = 0
-    if payload.provider_id is not None:
-        profile = db.query(WalkerProfile).filter(WalkerProfile.user_id == payload.provider_id).first()
-        if profile is not None:
-            completed_services = profile.total_walks
+
+    if current_user.role not in (UserRole.OWNER, UserRole.ADMIN):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo propietarios y administradores pueden cotizar servicios",
+        )
 
     distance_km: Decimal | None = None
     if payload.service_type == ServiceType.TRANSPORT:
@@ -94,7 +95,6 @@ def quote(
         payload.service_type,
         payload.duration_minutes,
         payload.num_pets,
-        completed_services,
         distance_km,
     )
 
@@ -132,15 +132,49 @@ def list_mine(
     bookings = query.order_by(Booking.created_at.desc()).all()
     for b in bookings:
         _attach_extra_fields(db, b)
+
+    if current_user.role == UserRole.WALKER:
+        from fastapi.responses import JSONResponse
+
+        safe_bookings = [
+            BookingResponse.model_validate(b).model_dump(
+                mode="json",
+                exclude={"platform_fee", "price_total"},
+            )
+            for b in bookings
+        ]
+        return JSONResponse(content=safe_bookings)
+
+    if current_user.role == UserRole.OWNER:
+        return [
+            BookingResponse.model_validate(b).model_copy(
+                update={
+                    "provider_name": b.provider.full_name if b.provider else None
+                }
+            )
+            for b in bookings
+        ]
+
     return bookings
 
 
-@router.get("/available", response_model=list[BookingResponse])
+@router.get("/available", response_model=list[BookingResponse], response_model_exclude={"__all__": {"platform_fee", "price_total"}})
 def list_available(
     service_type: ServiceType = Query(default=ServiceType.WALK),
     current_user: User = Depends(require_role(UserRole.WALKER)),
     db: Session = Depends(get_db),
 ):
+    expected_type = (
+        ServiceType.WALK if current_user.service_type == "walk"
+        else ServiceType.TRANSPORT if current_user.service_type == "transport"
+        else None
+    )
+    if expected_type is None or service_type != expected_type:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tenes acceso a solicitudes de este tipo de servicio.",
+        )
+
     # Verificación de seguridad: solo paseadores online y con KYC aprobado pueden ver servicios disponibles
     profile = db.query(WalkerProfile).filter(WalkerProfile.user_id == current_user.id).first()
     if profile is None or not profile.is_online:
@@ -170,9 +204,34 @@ def list_available(
         .order_by(Booking.created_at.asc())
         .all()
     )
+    compatible_bookings = []
+    for booking in bookings:
+        if not booking.booking_pets:
+            continue
+        compatible = True
+        for association in booking.booking_pets:
+            pet = association.pet
+            if pet is None or pet.species not in ("dog", "cat"):
+                compatible = False
+                break
+            if service_type == ServiceType.WALK and pet.species != "dog":
+                compatible = False
+                break
+            if pet.species == "cat" and (pet.is_ppp is True or not profile.accepts_cats):
+                compatible = False
+                break
+            if pet.species == "dog" and (
+                pet.is_ppp is None or (pet.is_ppp is True and not profile.accepts_ppp)
+            ):
+                compatible = False
+                break
+        if compatible:
+            compatible_bookings.append(booking)
+    bookings = compatible_bookings
+
     from app.services.bookings import get_platform_fee_rate
     from decimal import Decimal
-    fee_rate = get_platform_fee_rate(profile.total_walks)
+    fee_rate = get_platform_fee_rate()
     for b in bookings:
         _attach_extra_fields(db, b)
         # Calcular ganancia estimada para mostrar en el radar antes de aceptar
@@ -212,12 +271,59 @@ def get_one(
                 .first()
             )
             if verification and verification.status == WalkerVerificationStatus.APPROVED:
-                is_eligible_candidate = True
+                expected_service = (
+                    ServiceType.WALK if current_user.service_type == "walk"
+                    else ServiceType.TRANSPORT if current_user.service_type == "transport"
+                    else None
+                )
+                if booking.service_type == expected_service and booking.booking_pets:
+                    compatible = True
+                    for association in booking.booking_pets:
+                        pet = association.pet
+                        if pet is None or pet.species not in ("dog", "cat"):
+                            compatible = False
+                            break
+                        if booking.service_type == ServiceType.WALK and pet.species != "dog":
+                            compatible = False
+                            break
+                        if pet.species == "cat" and (pet.is_ppp is True or not profile.accepts_cats):
+                            compatible = False
+                            break
+                        if pet.species == "dog" and (
+                            pet.is_ppp is None or (pet.is_ppp is True and not profile.accepts_ppp)
+                        ):
+                            compatible = False
+                            break
+                    is_eligible_candidate = compatible
 
     if not (is_owner or is_provider or is_admin or is_eligible_candidate):
         raise HTTPException(status_code=403, detail="Sin acceso a esta reserva")
 
     _attach_extra_fields(db, booking)
+    if current_user.role == UserRole.WALKER:
+        from fastapi.responses import JSONResponse
+
+        safe_booking = BookingResponse.model_validate(booking).model_copy(
+            update={
+                "owner_name": booking.owner.full_name
+                if is_provider and booking.owner else None,
+                "cancelled_by_name": booking.cancelled_by.full_name
+                if is_provider
+                and booking.status == BookingStatus.CANCELLED
+                and booking.cancelled_by else None,
+            }
+        ).model_dump(
+            mode="json",
+            exclude={"platform_fee", "price_total"},
+        )
+        return JSONResponse(content=safe_booking)
+    if is_owner:
+        return BookingResponse.model_validate(booking).model_copy(
+            update={
+                "provider_name": booking.provider.full_name
+                if booking.provider else None
+            }
+        )
     return booking
 
 
@@ -240,6 +346,14 @@ def update_status(
         raise HTTPException(status_code=400, detail="Acción no soportada para este estado")
 
     _attach_extra_fields(db, b)
+    if current_user.role == UserRole.WALKER:
+        from fastapi.responses import JSONResponse
+
+        safe_booking = BookingResponse.model_validate(b).model_dump(
+            mode="json",
+            exclude={"platform_fee", "price_total"},
+        )
+        return JSONResponse(content=safe_booking)
     return b
 
 

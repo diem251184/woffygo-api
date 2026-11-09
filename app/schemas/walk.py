@@ -1,4 +1,4 @@
-﻿from app.schemas.booking import (
+from app.schemas.booking import (
     BookingResponse as WalkResponse,
     BookingCreate as WalkCreate,
     BookingLocationCreate as WalkLocationCreate,

@@ -81,14 +81,20 @@ def list_nearby(
     lat_delta = radius_km / 111.0
     lng_delta = radius_km / (111.0 * max(0.1, abs(__import__("math").cos(__import__("math").radians(lat)))))
 
+    from geoalchemy2.functions import ST_DWithin
+    from geoalchemy2 import Geography
+    from sqlalchemy import cast, func
+
+    # Usamos ST_DWithin para filtrar por distancia en metros
     q = (
         db.query(SafetyReport)
-        .filter(SafetyReport.deleted.is_(False))
-        .filter(SafetyReport.expires_at > now)
-        .filter(SafetyReport.latitude >= lat - lat_delta)
-        .filter(SafetyReport.latitude <= lat + lat_delta)
-        .filter(SafetyReport.longitude >= lng - lng_delta)
-        .filter(SafetyReport.longitude <= lng + lng_delta)
+        .filter(
+            ST_DWithin(
+                cast(SafetyReport.location, Geography),
+                cast(func.ST_SetSRID(func.ST_MakePoint(lng, lat), 4326), Geography),
+                radius_km * 1000
+            )
+        )
         .order_by(SafetyReport.created_at.desc())
         .limit(200)
     )

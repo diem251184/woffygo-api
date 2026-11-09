@@ -1,4 +1,4 @@
-﻿from app.services.bookings import (
+from app.services.bookings import (
     create_booking as create_walk,
     accept_booking as accept_walk,
     start_booking as start_walk,

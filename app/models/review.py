@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 from sqlalchemy import Integer, Text, DateTime, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column
 

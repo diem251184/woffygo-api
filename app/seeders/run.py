@@ -1,4 +1,4 @@
-﻿"""Seeder principal de Woffy Go.
+"""Seeder principal de Woffy Go.
 
 Uso:
     python -m app.seeders.run

@@ -30,7 +30,6 @@ htmlcov/
 *.swp
 
 # === Docker ===
-.dockerignore
 
 # === Sistema ===
 .DS_Store
@@ -41,3 +40,14 @@ _tmp_*
 # Backups de limpieza
 backup_db_*.json
 backup_users_*.json
+
+# Archivos locales que nunca deben publicarse
+/woffygo.db
+/_cuarentena/
+/fix_ui.py
+*.bak
+*.bak-*
+*.backup
+*.sqlite
+*.sqlite3
+/.env.example
