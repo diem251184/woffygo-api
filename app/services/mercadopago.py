@@ -65,12 +65,16 @@ def verify_mercadopago_signature(
     data_id: str | None,
 ) -> bool:
     """Valida la firma HMAC-SHA256 enviada por Mercado Pago en el webhook."""
+    import logging
+    hmac_log = logging.getLogger(__name__)
     secret = (getattr(settings, "MERCADOPAGO_WEBHOOK_SECRET", None) or "").strip()
     if not secret:
         # Sin secreto configurado, ninguna firma puede validarse.
+        hmac_log.warning("MP_WEBHOOK_HMAC_REJECT: SECRET_MISSING")
         return False
 
     if not x_signature or not data_id:
+        hmac_log.warning("MP_WEBHOOK_HMAC_REJECT: SIGNATURE_OR_ID_MISSING")
         return False
 
     parts = {}
@@ -82,14 +86,17 @@ def verify_mercadopago_signature(
     ts = parts.get("ts")
     v1 = parts.get("v1")
     if not ts or not v1:
+        hmac_log.warning("MP_WEBHOOK_HMAC_REJECT: SIGNATURE_PARTS_MISSING")
         return False
 
     # Validacion temporal conservadora de webhooks.
     # MP puede reenviar notificaciones dias despues.
     # La idempotencia persistente se controla aparte.
     if not ts.isascii() or not ts.isdecimal():
+        hmac_log.warning("MP_WEBHOOK_HMAC_REJECT: TIMESTAMP_FORMAT")
         return False
     if len(ts) not in (10, 13):
+        hmac_log.warning("MP_WEBHOOK_HMAC_REJECT: TIMESTAMP_LENGTH")
         return False
 
     timestamp = int(ts)
@@ -104,6 +111,7 @@ def verify_mercadopago_signature(
         now_timestamp - max_past_seconds <= timestamp
         <= now_timestamp + max_future_seconds
     ):
+        hmac_log.warning("MP_WEBHOOK_HMAC_REJECT: TIMESTAMP_OUT_OF_RANGE")
         return False
 
     manifest = f"id:{data_id};"
@@ -116,7 +124,10 @@ def verify_mercadopago_signature(
         hashlib.sha256,
     ).hexdigest()
 
-    return hmac.compare_digest(computed, v1)
+    valid = hmac.compare_digest(computed, v1)
+    if not valid:
+        hmac_log.warning("MP_WEBHOOK_HMAC_REJECT: DIGEST_MISMATCH")
+    return valid
 
 
 def create_checkout(
