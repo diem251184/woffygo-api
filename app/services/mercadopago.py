@@ -127,6 +127,19 @@ def verify_mercadopago_signature(
     valid = hmac.compare_digest(computed, v1)
     if not valid:
         hmac_log.warning("MP_WEBHOOK_HMAC_REJECT: DIGEST_MISMATCH")
+        if not x_request_id:
+            hmac_log.warning("MP_WEBHOOK_HMAC_DIAG: REQUEST_ID_ABSENT")
+        else:
+            alt_manifest = f"id:{data_id};ts:{ts};"
+            alt_digest = hmac.new(
+                secret.encode("utf-8"),
+                alt_manifest.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            if hmac.compare_digest(alt_digest, v1):
+                hmac_log.warning("MP_WEBHOOK_HMAC_DIAG: ALT_NO_REQUEST_MATCH")
+            else:
+                hmac_log.warning("MP_WEBHOOK_HMAC_DIAG: ALT_NO_REQUEST_MISMATCH")
     return valid
 
 
