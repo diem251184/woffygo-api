@@ -60,7 +60,7 @@ def send_password_reset_email(to: str, full_name: str, token: str) -> bool:
 
     # DEBUG: log del token para poder testear en desarrollo.
     # Comentar este print cuando el flujo este 100% verificado en produccion.
-    print(f"[email] DEBUG token para {to}: {token}")
+    # Nunca registrar tokens de recuperacion en logs.
 
     # Usamos entidades HTML (&ntilde;, &oacute;, etc.) para garantizar
     # que la ñ y los acentos se vean bien en TODOS los clientes de email,
