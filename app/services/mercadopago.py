@@ -19,9 +19,15 @@ from app.models.user import User
 from app.models.booking import Booking, BookingStatus
 
 # No habilitar hasta validar webhooks por intento.
-PAYMENT_ATTEMPT_WEBHOOK_READY = False
+from os import environ as _mp_runtime_env
+
+PAYMENT_ATTEMPT_WEBHOOK_READY = (
+    _mp_runtime_env.get("WOFFY_MP_PAYMENT_ATTEMPT_READY") == "1"
+)
 LEGACY_PAYMENT_SYNC_READY = False
-PAYMENT_RECONCILIATION_READY = False
+PAYMENT_RECONCILIATION_READY = (
+    _mp_runtime_env.get("WOFFY_MP_RECONCILIATION_READY") == "1"
+)
 
 
 def _sdk() -> mercadopago.SDK:
