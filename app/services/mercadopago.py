@@ -157,6 +157,25 @@ def create_checkout(
             detail="Checkout temporalmente suspendido durante la integracion segura",
         )
 
+    # Acceso adicional y cerrado por defecto para checkout TEST.
+    from os import environ
+    qa_enabled = environ.get("WOFFY_MP_TEST_CHECKOUT_ENABLED") == "1"
+    qa_raw_ids = environ.get("WOFFY_MP_TEST_OWNER_IDS", "")
+    qa_ids = [item.strip() for item in qa_raw_ids.split(",")]
+    qa_ids_valid = (
+        bool(qa_raw_ids)
+        and all(item.isascii() and item.isdecimal() for item in qa_ids)
+    )
+    if (
+        not qa_enabled
+        or not qa_ids_valid
+        or str(owner.id) not in qa_ids
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Checkout restringido a pruebas autorizadas",
+        )
+
     if base_url is None:
         base_url = settings.PUBLIC_BASE_URL
 
@@ -269,13 +288,13 @@ def create_checkout(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Error comunicándose con MercadoPago: {e}",
+            detail="No se pudo crear la preferencia de pago",
         )
 
     if result.get("status") not in (200, 201):
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"MercadoPago rechazó la creación de la preferencia: {result}",
+            detail="No se pudo crear la preferencia de pago",
         )
 
     preference = result["response"]
