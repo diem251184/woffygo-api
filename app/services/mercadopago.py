@@ -899,6 +899,13 @@ def sync_payment_from_mp(db: Session, mp_payment_id: str) -> Payment | None:
                     decision,
                 )
 
+        # Cerrar el intento solo tras conciliacion exitosa.
+        # Preservar estados de revision manual.
+        if reconciled:
+            attempt.mp_payment_id = mp_id
+            if attempt.status == "created":
+                attempt.status = "approved"
+
         # Transiciones terminales conservadoras.
         # No operan mientras la conciliacion permanezca bloqueada.
         if (
