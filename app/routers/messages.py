@@ -48,7 +48,7 @@ def _get_walk_or_404(db: Session, walk_id: int):
 def _ensure_participant(walk: Walk, user: User) -> None:
     """Valida que el user sea duenio o paseador del paseo (o admin)."""
     is_owner = walk.owner_id == user.id
-    is_walker = walk.provider_id == user.id
+    is_walker = walk.walker_id == user.id
     is_admin = user.role == UserRole.ADMIN
     if not (is_owner or is_walker or is_admin):
         raise HTTPException(
