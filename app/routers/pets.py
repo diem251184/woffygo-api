@@ -185,3 +185,337 @@ async def upload_pet_photo(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error Cloudinary: {str(e)}",
         )
+
+# ---- CL143: documentos sanitarios privados de mascotas ----
+
+from app.models.pet_health_document import PetHealthDocument
+from app.services.pet_health_documents import (
+    upload_pet_health_document as store_pet_health_document,
+    delete_pet_health_document as remove_pet_health_document,
+)
+
+
+@router.get("/{pet_id}/health-documents")
+def list_pet_health_documents(
+    pet_id: int,
+    current_user: User = Depends(require_role(UserRole.OWNER)),
+    db: Session = Depends(get_db),
+):
+    pet = db.query(Pet).filter(
+        Pet.id == pet_id,
+        Pet.owner_id == current_user.id,
+    ).first()
+
+    if pet is None:
+        raise HTTPException(status_code=404, detail="Mascota no encontrada")
+
+    documents = (
+        db.query(PetHealthDocument)
+        .filter(PetHealthDocument.pet_id == pet.id)
+        .order_by(PetHealthDocument.id.desc())
+        .all()
+    )
+
+    return [
+        {
+            "id": item.id,
+            "pet_id": item.pet_id,
+            "content_type": item.content_type,
+            "created_at": item.created_at,
+        }
+        for item in documents
+    ]
+
+
+@router.post("/{pet_id}/health-documents", status_code=201)
+async def upload_pet_health_document_endpoint(
+    pet_id: int,
+    document: UploadFile = File(...),
+    current_user: User = Depends(require_role(UserRole.OWNER)),
+    db: Session = Depends(get_db),
+):
+    pet = db.query(Pet).filter(
+        Pet.id == pet_id,
+        Pet.owner_id == current_user.id,
+    ).first()
+
+    if pet is None:
+        raise HTTPException(status_code=404, detail="Mascota no encontrada")
+
+    content_type = (
+        (document.content_type or "").lower().split(";")[0].strip()
+    )
+
+    if content_type not in ALLOWED_PET_PHOTO_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail="Documento no admitido. Usá JPEG, PNG o WebP.",
+        )
+
+    try:
+        data = await document.read(MAX_PET_PHOTO_BYTES + 1)
+    finally:
+        await document.close()
+
+    if not data:
+        raise HTTPException(status_code=400, detail="Archivo vacío")
+
+    if len(data) > MAX_PET_PHOTO_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="El documento supera el máximo de 8 MB.",
+        )
+
+    if not valid_pet_image_signature(data, content_type):
+        raise HTTPException(
+            status_code=415,
+            detail="El contenido no coincide con el formato declarado.",
+        )
+
+    formats = {
+        "image/jpeg": "JPEG",
+        "image/png": "PNG",
+        "image/webp": "WEBP",
+    }
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter(
+                "error",
+                Image.DecompressionBombWarning,
+            )
+
+            with Image.open(BytesIO(data)) as image:
+                if image.format != formats[content_type]:
+                    raise ValueError("Formato real diferente")
+
+                width, height = image.size
+                if width <= 0 or height <= 0:
+                    raise ValueError("Dimensiones inválidas")
+
+                if width * height > MAX_PET_PHOTO_PIXELS:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="La imagen supera 20 millones de píxeles.",
+                    )
+
+                image.verify()
+
+            with Image.open(BytesIO(data)) as image:
+                if image.format != formats[content_type]:
+                    raise ValueError("Formato real diferente")
+                image.load()
+
+    except HTTPException:
+        raise
+    except (
+        UnidentifiedImageError,
+        OSError,
+        ValueError,
+        SyntaxError,
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+    ):
+        raise HTTPException(
+            status_code=415,
+            detail="Documento inválido o dañado.",
+        )
+
+    # El ID almacenado es privado; nunca se devuelve en la respuesta.
+    try:
+        private_id = store_pet_health_document(
+            data,
+            current_user.id,
+            pet.id,
+            content_type,
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail="No se pudo almacenar el documento sanitario.",
+        )
+
+    record = PetHealthDocument(
+        pet_id=pet.id,
+        public_id=private_id,
+        content_type=content_type,
+    )
+
+    try:
+        db.add(record)
+        db.commit()
+    except Exception:
+        db.rollback()
+        # Limpiar solo el archivo recién subido, nunca uno anterior.
+        try:
+            remove_pet_health_document(
+                private_id,
+                current_user.id,
+                pet.id,
+            )
+        except Exception:
+            pass
+
+        raise HTTPException(
+            status_code=500,
+            detail="No se pudo registrar el documento sanitario.",
+        )
+
+    db.refresh(record)
+
+    return {
+        "id": record.id,
+        "pet_id": record.pet_id,
+        "content_type": record.content_type,
+        "created_at": record.created_at,
+    }
+
+# ---- CL143: acceso y eliminacion de documentos sanitarios ----
+
+@router.get(
+    "/{pet_id}/health-documents/{document_id}/temporary-url"
+)
+def get_pet_health_document_temporary_url(
+    pet_id: int,
+    document_id: int,
+    current_user: User = Depends(require_role(UserRole.OWNER)),
+    db: Session = Depends(get_db),
+):
+    import re
+    from time import time
+    from cloudinary.utils import private_download_url
+
+    if pet_id <= 0 or document_id <= 0:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+
+    record = (
+        db.query(PetHealthDocument)
+        .join(Pet, Pet.id == PetHealthDocument.pet_id)
+        .filter(
+            Pet.id == pet_id,
+            Pet.owner_id == current_user.id,
+            PetHealthDocument.id == document_id,
+        )
+        .first()
+    )
+
+    if record is None:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+
+    expected_folder = (
+        f"woffygo/pet-health/{current_user.id}/{pet_id}"
+    )
+
+    expected_pattern = (
+        re.escape(expected_folder) + r"/health_[0-9a-f]{32}"
+    )
+
+    if re.fullmatch(
+        expected_pattern,
+        record.public_id,
+        flags=re.ASCII,
+    ) is None:
+        raise HTTPException(status_code=404, detail="Documento no disponible")
+
+    extensions = {
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+    }
+
+    extension = extensions.get(record.content_type)
+    if extension is None:
+        raise HTTPException(status_code=404, detail="Documento no disponible")
+
+    try:
+        expires_at = int(time()) + 60
+
+        signed_url = private_download_url(
+            record.public_id,
+            extension,
+            resource_type="image",
+            type="authenticated",
+            expires_at=expires_at,
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail="No se pudo preparar el acceso al documento.",
+        )
+
+    if not isinstance(signed_url, str) or not signed_url.startswith("https://"):
+        raise HTTPException(
+            status_code=502,
+            detail="No se pudo preparar el acceso seguro.",
+        )
+
+    return {
+        "url": signed_url,
+        "expires_in": 60,
+    }
+
+
+@router.delete(
+    "/{pet_id}/health-documents/{document_id}",
+    status_code=204,
+)
+def delete_pet_health_document_endpoint(
+    pet_id: int,
+    document_id: int,
+    current_user: User = Depends(require_role(UserRole.OWNER)),
+    db: Session = Depends(get_db),
+):
+    if pet_id <= 0 or document_id <= 0:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+
+    record = (
+        db.query(PetHealthDocument)
+        .join(Pet, Pet.id == PetHealthDocument.pet_id)
+        .filter(
+            Pet.id == pet_id,
+            Pet.owner_id == current_user.id,
+            PetHealthDocument.id == document_id,
+        )
+        .with_for_update(of=PetHealthDocument)
+        .first()
+    )
+
+    if record is None:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+
+    try:
+        removed = remove_pet_health_document(
+            record.public_id,
+            current_user.id,
+            pet_id,
+        )
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=502,
+            detail="No se pudo confirmar la eliminación del documento.",
+        )
+
+    if not removed:
+        db.rollback()
+        raise HTTPException(
+            status_code=502,
+            detail="La eliminación del archivo no fue confirmada.",
+        )
+
+    try:
+        db.delete(record)
+        db.commit()
+    except Exception:
+        db.rollback()
+        # El archivo externo ya fue eliminado. No reintentar
+        # automáticamente; requiere conciliación manual.
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "El archivo fue eliminado, pero no se pudo "
+                "confirmar la actualización del registro."
+            ),
+        )
+
+    return None

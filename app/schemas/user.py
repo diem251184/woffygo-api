@@ -26,13 +26,13 @@ class UserLogin(BaseModel):
 
 
 class UserUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     full_name: str | None = Field(default=None, min_length=2, max_length=120)
     phone: str | None = Field(default=None, min_length=6, max_length=30)
     dni_number: str | None = None
     address: str | None = None
     birth_date: date | None = None
     emergency_contact: str | None = None
-    profile_photo_url: str | None = None
 
 
 class UserResponse(BaseModel):
@@ -49,6 +49,7 @@ class UserResponse(BaseModel):
     address: str | None = None
     birth_date: date | None = None
     emergency_contact: str | None = None
+    profile_review_status: str = "clear"
     is_active: bool
     created_at: datetime
     updated_at: datetime

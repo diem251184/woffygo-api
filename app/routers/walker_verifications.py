@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.deps import require_role
 from app.models.user import User, UserRole
+from app.models.walker_profile import WalkerProfile
 from app.models.walker_verification import (
     WalkerVerification,
     WalkerVerificationStatus,
@@ -19,6 +20,12 @@ from app.services import admin_log, email, push
 from app.services.cloudinary_service import upload_kyc_document, delete_kyc_attempt
 
 router = APIRouter(prefix="/walker-verifications", tags=["walker-verifications"])
+
+def _suspend_provider_availability(db: Session, user_id: int) -> None:
+    """Desactiva disponibilidad en la misma transaccion del cambio KYC."""
+    profile = db.query(WalkerProfile).filter(WalkerProfile.user_id == user_id).first()
+    if profile is not None:
+        profile.is_online = False
 
 def _get_or_create_verification(db: Session, user_id: int) -> WalkerVerification:
     v = db.query(WalkerVerification).filter(WalkerVerification.user_id == user_id).first()
@@ -63,6 +70,7 @@ async def upload_identity(
         v.selfie_url = upload_kyc_document(await selfie.read(), current_user.id, "selfie", register_attempt=uploaded_attempts.append)
         v.identity_status = DocumentStatus.PENDING
         v.status = WalkerVerificationStatus.PENDING
+        _suspend_provider_availability(db, current_user.id)
         v.identity_rejection_reason = None
         commit_attempted = True
         db.commit()
@@ -103,6 +111,7 @@ async def upload_license(
         v.license_back_url = upload_kyc_document(await license_back.read(), current_user.id, "license_back", register_attempt=uploaded_attempts.append)
         v.license_status = DocumentStatus.PENDING
         v.status = WalkerVerificationStatus.PENDING
+        _suspend_provider_availability(db, current_user.id)
         v.license_rejection_reason = None
         commit_attempted = True
         db.commit()
@@ -133,7 +142,7 @@ async def upload_vehicle(
     db: Session = Depends(get_db),
 ):
     if current_user.service_type == "transport" and vehicle_insurance is None:
-        raise HTTPException(status_code=422, detail="El seguro del vehículo es obligatorio para Pet Taxi.")
+        raise HTTPException(status_code=422, detail="El seguro del vehículo es obligatorio para Woofy Traslados.")
     v = _get_or_create_verification(db, current_user.id)
     uploaded_attempts = []
     commit_attempted = False
@@ -149,6 +158,7 @@ async def upload_vehicle(
 
         v.vehicle_status = DocumentStatus.PENDING
         v.status = WalkerVerificationStatus.PENDING
+        _suspend_provider_availability(db, current_user.id)
         v.vehicle_rejection_reason = None
         commit_attempted = True
         db.commit()
@@ -263,7 +273,7 @@ def approve_block(
         ):
             raise HTTPException(
                 status_code=422,
-                detail="No se puede aprobar el vehículo de Pet Taxi sin seguro registrado.",
+                detail="No se puede aprobar el vehículo de Woofy Traslados sin seguro registrado.",
             )
         v.vehicle_status = DocumentStatus.APPROVED
     else:

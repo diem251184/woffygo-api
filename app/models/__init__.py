@@ -2,6 +2,7 @@ from app.models.safety_report import SafetyReport, SafetyCategory
 from app.models.user import User, UserRole
 from app.models.walker_profile import WalkerProfile
 from app.models.pet import Pet
+from app.models.pet_health_document import PetHealthDocument
 from app.models.booking import Booking, BookingPet, BookingStatus, ServiceType
 from app.models.provider_service import ProviderService
 from app.models.walk_location import WalkLocation

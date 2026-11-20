@@ -26,3 +26,17 @@ services:
         value: "2500.00"
       - key: MAX_HOURLY_RATE
         value: "3500.00"
+  - type: cron
+    name: woffygo-payment-recovery
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: python -m app.services.payment_recovery
+    schedule: "0 * * * *"
+    autoDeployTrigger: "off"
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: MERCADOPAGO_ACCESS_TOKEN
+        sync: false
+      - key: WOFFY_MP_RECOVERY_ENABLED
+        sync: false

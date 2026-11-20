@@ -97,23 +97,40 @@ def update_me(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> User:
-    if payload.full_name is not None:
-        current_user.full_name = payload.full_name
-    if payload.phone is not None:
-        current_user.phone = payload.phone
-    if payload.dni_number is not None:
-        current_user.dni_number = payload.dni_number
-    if payload.address is not None:
-        current_user.address = payload.address
-    if payload.birth_date is not None:
-        current_user.birth_date = payload.birth_date
-    if payload.emergency_contact is not None:
-        current_user.emergency_contact = payload.emergency_contact
+    """Register profile modifications for administrative review."""
 
-    db.commit()
-    db.refresh(current_user)
-    return current_user
+    from app.models.user import UserRole
+    from app.services.profile_review import request_profile_review
 
+    if current_user.role not in (UserRole.OWNER, UserRole.WALKER):
+        raise HTTPException(
+            status_code=403,
+            detail="Esta operación no corresponde al perfil de la cuenta",
+        )
+
+    changes = payload.model_dump(exclude_unset=True)
+
+    for required_field in ("full_name", "phone"):
+        if required_field in changes and changes[required_field] is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Nombre y teléfono son obligatorios",
+            )
+
+    try:
+        request_profile_review(
+            db,
+            user_id=current_user.id,
+            changes=changes,
+        )
+
+        db.commit()
+        db.refresh(current_user)
+        return current_user
+
+    except Exception:
+        db.rollback()
+        raise
 
 @router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
 def delete_me(

@@ -133,5 +133,25 @@ def delete_pet(db: Session, pet_id: int, user: User) -> None:
             detail="No se puede eliminar una mascota con paseos asociados",
         )
 
+    # Evitar registros eliminados por CASCADE con archivos privados
+    # todavia almacenados en Cloudinary.
+    from app.models.pet_health_document import PetHealthDocument
+
+    has_health_documents = (
+        db.query(PetHealthDocument.id)
+        .filter(PetHealthDocument.pet_id == pet.id)
+        .first()
+        is not None
+    )
+
+    if has_health_documents:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Primero eliminá los documentos de la libreta sanitaria "
+                "antes de eliminar esta mascota."
+            ),
+        )
+
     db.delete(pet)
     db.commit()

@@ -73,7 +73,7 @@ def calculate_quote(
         if distance_km is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Se requiere la distancia calculada para cotizar Pet Taxi",
+                detail="Se requiere la distancia calculada para cotizar Woofy Traslados",
             )
         price_total = transport_price(distance_km, num_pets)
     else:
@@ -86,6 +86,8 @@ def calculate_quote(
 
 
 def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
+    from app.services.profile_service_access import ensure_profile_services_enabled
+    ensure_profile_services_enabled(owner)
     if len(payload.pet_ids) == 0 or len(payload.pet_ids) > MAX_PETS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -108,7 +110,7 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
     if payload.service_type not in (ServiceType.WALK, ServiceType.TRANSPORT):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Solo se permiten reservas de paseo o Pet Taxi.",
+            detail="Solo se permiten reservas de paseo o Woofy Traslados.",
         )
 
     for pet in pets:
@@ -143,7 +145,7 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Pet Taxi requiere coordenadas de destino validas",
+                detail="Woofy Traslados requiere coordenadas de destino validas",
             )
         dist_km = get_driving_distance_km(
             payload.pickup_latitude,
@@ -195,6 +197,8 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
 
 
 def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
+    from app.services.profile_service_access import ensure_profile_services_enabled
+    ensure_profile_services_enabled(provider)
     # 1. Bloqueo pesimista de fila en BD para evitar asignaciones concurrentes
     booking = (
         db.query(Booking)

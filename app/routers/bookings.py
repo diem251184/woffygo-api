@@ -82,7 +82,7 @@ def quote(
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Para cotizar Pet Taxi debes enviar coordenadas de origen y destino",
+                detail="Para cotizar Woofy Traslados debes enviar coordenadas de origen y destino",
             )
         distance_km = get_driving_distance_km(
             payload.origin_latitude,
@@ -164,6 +164,8 @@ def list_available(
     current_user: User = Depends(require_role(UserRole.WALKER)),
     db: Session = Depends(get_db),
 ):
+    from app.services.profile_service_access import ensure_profile_services_enabled
+    ensure_profile_services_enabled(current_user)
     expected_type = (
         ServiceType.WALK if current_user.service_type == "walk"
         else ServiceType.TRANSPORT if current_user.service_type == "transport"

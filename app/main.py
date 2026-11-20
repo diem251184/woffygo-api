@@ -16,6 +16,7 @@ from app.routers import (
     walker_verifications,
     walkers,
 )
+from app.routers import profile_reviews_admin, profile_reviews_user
 
 
 @asynccontextmanager
@@ -51,6 +52,8 @@ app.include_router(reviews.router)
 app.include_router(safety_reports.router)
 app.include_router(app_info.router)
 app.include_router(walker_verifications.router)
+app.include_router(profile_reviews_user.router)
+app.include_router(profile_reviews_admin.router)
 
 
 @app.get("/health", tags=["health"])

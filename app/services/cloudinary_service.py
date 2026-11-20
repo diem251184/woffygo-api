@@ -96,3 +96,92 @@ def delete_kyc_attempt(public_id: str, user_id: int) -> bool:
         return False
 
     return result.get("result") in ("ok", "not found")
+
+def upload_pending_user_avatar(file_bytes: bytes, user_id: int) -> tuple[str, str]:
+    """Create a separate pending avatar without overwriting approved images."""
+    from uuid import uuid4
+
+    if user_id <= 0 or not file_bytes:
+        raise ValueError("Invalid pending avatar request")
+
+    public_id = f"woffygo/users/{user_id}/pending/{uuid4().hex}"
+
+    result = cloudinary.uploader.upload(
+        file_bytes,
+        public_id=public_id,
+        overwrite=False,
+        resource_type="image",
+        transformation=[
+            {"width": 500, "height": 500, "crop": "fill", "gravity": "face"},
+            {"quality": "auto", "fetch_format": "auto"},
+        ],
+    )
+
+    secure_url = result.get("secure_url")
+    returned_id = result.get("public_id")
+
+    if (not isinstance(secure_url, str)
+            or not secure_url.startswith("https://")
+            or returned_id != public_id):
+        raise RuntimeError("Unexpected pending avatar upload response")
+
+    return secure_url, public_id
+
+
+def delete_pending_user_avatar(public_id: str, user_id: int) -> bool:
+    """Allow removal only from the specified user's pending folder."""
+    import re
+
+    if not isinstance(public_id, str) or user_id <= 0:
+        raise ValueError("Invalid pending avatar identifier")
+
+    pattern = rf"woffygo/users/{user_id}/pending/[0-9a-f]{{32}}"
+
+    if re.fullmatch(pattern, public_id) is None:
+        raise ValueError("Refusing deletion outside pending avatar folder")
+
+    response = cloudinary.uploader.destroy(
+        public_id,
+        resource_type="image",
+        invalidate=True,
+    )
+
+    return response.get("result") in ("ok", "not found")
+
+def pending_avatar_id_from_url(secure_url: str, user_id: int) -> str | None:
+    """Recover only an exact pending Cloudinary asset ID for this user."""
+    import re
+    from urllib.parse import urlsplit
+
+    if not isinstance(secure_url, str) or user_id <= 0:
+        return None
+
+    cloud_name = cloudinary.config().cloud_name
+    if not isinstance(cloud_name, str) or not cloud_name:
+        return None
+
+    try:
+        parsed = urlsplit(secure_url)
+    except ValueError:
+        return None
+
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "res.cloudinary.com"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+
+    pattern = (
+        rf"/{re.escape(cloud_name)}/image/upload/"
+        rf"(?:v[0-9]+/)?"
+        rf"(woffygo/users/{user_id}/pending/[0-9a-f]{{32}})"
+        rf"(?:\.[a-z0-9]+)?"
+    )
+
+    match = re.fullmatch(pattern, parsed.path)
+    return match.group(1) if match else None

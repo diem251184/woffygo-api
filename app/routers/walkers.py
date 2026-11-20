@@ -55,7 +55,7 @@ def create_profile(
     if payload.accepts_cats and current_user.service_type != "transport":
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Solo los prestadores de Pet Taxi pueden aceptar gatos.",
+            detail="Solo los prestadores de Woofy Traslados pueden aceptar gatos.",
         )
 
     existing = (
@@ -115,7 +115,7 @@ def update_my_profile(
     if payload.accepts_cats is True and current_user.service_type != "transport":
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Solo los prestadores de Pet Taxi pueden aceptar gatos.",
+            detail="Solo los prestadores de Woofy Traslados pueden aceptar gatos.",
         )
 
     profile = _get_or_404_profile(db, current_user)
