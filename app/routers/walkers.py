@@ -7,6 +7,7 @@ from app.core.deps import get_current_user, require_role
 from app.models.user import User, UserRole
 from app.models.walker_profile import WalkerProfile
 from app.models.walker_verification import WalkerVerification, WalkerVerificationStatus
+from app.services.kyc_eligibility import is_kyc_operationally_approved
 from app.schemas.walker import (
     WalkerLocationUpdate,
     WalkerNearbyResult,
@@ -160,7 +161,7 @@ def toggle_online(
             .order_by(WalkerVerification.id.desc())
             .first()
         )
-        if not verification or verification.status != WalkerVerificationStatus.APPROVED:
+        if not is_kyc_operationally_approved(verification, current_user.service_type):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Tu cuenta no está verificada por un administrador. Completá la verificación de identidad (KYC) para recibir paseos.",

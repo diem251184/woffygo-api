@@ -13,6 +13,7 @@ from app.models.user import User, UserRole
 from app.models.walk_location import WalkLocation
 from app.models.walker_profile import WalkerProfile
 from app.models.walker_verification import WalkerVerification, WalkerVerificationStatus
+from app.services.kyc_eligibility import is_kyc_operationally_approved
 from app.schemas.booking import (
     BookingCreate,
     BookingLocationCreate,
@@ -191,7 +192,7 @@ def list_available(
         .order_by(WalkerVerification.id.desc())
         .first()
     )
-    if not verification or verification.status != WalkerVerificationStatus.APPROVED:
+    if not is_kyc_operationally_approved(verification, current_user.service_type):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Tu cuenta debe estar verificada para ver solicitudes disponibles",
@@ -272,7 +273,7 @@ def get_one(
                 .order_by(WalkerVerification.id.desc())
                 .first()
             )
-            if verification and verification.status == WalkerVerificationStatus.APPROVED:
+            if is_kyc_operationally_approved(verification, current_user.service_type):
                 expected_service = (
                     ServiceType.WALK if current_user.service_type == "walk"
                     else ServiceType.TRANSPORT if current_user.service_type == "transport"
@@ -408,18 +409,34 @@ def get_booking_locations(
         .limit(limit)
     )
 
+    from math import isfinite
+
     results = []
     for r in query.all():
-        lat = 0.0
-        lon = 0.0
-        if r.geojson:
-            try:
-                geom = json.loads(r.geojson)
-                coords = geom.get("coordinates", [0.0, 0.0])
-                lon = float(coords[0])
-                lat = float(coords[1])
-            except Exception:
-                pass
+        if not r.geojson:
+            continue
+
+        try:
+            geom = json.loads(r.geojson)
+            if geom.get("type") != "Point":
+                continue
+
+            coords = geom.get("coordinates")
+            if not isinstance(coords, (list, tuple)) or len(coords) < 2:
+                continue
+
+            lon = float(coords[0])
+            lat = float(coords[1])
+
+            if not (
+                isfinite(lon)
+                and isfinite(lat)
+                and -180 <= lon <= 180
+                and -90 <= lat <= 90
+            ):
+                continue
+        except (TypeError, ValueError, IndexError, AttributeError):
+            continue
 
         results.append({
             "id": r.id,

@@ -11,6 +11,7 @@ from app.models.pet import Pet
 from app.models.user import User, UserRole
 from app.models.walker_profile import WalkerProfile
 from app.models.walker_verification import WalkerVerification, WalkerVerificationStatus
+from app.services.kyc_eligibility import is_kyc_operationally_approved
 from app.schemas.booking import BookingCreate
 from app.services import push
 from app.services.escrow import start_escrow_window
@@ -235,7 +236,7 @@ def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
         .order_by(WalkerVerification.id.desc())
         .first()
     )
-    if not verification or verification.status != WalkerVerificationStatus.APPROVED:
+    if not is_kyc_operationally_approved(verification, provider.service_type):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Tu cuenta debe estar verificada por un administrador para aceptar solicitudes",
@@ -465,6 +466,7 @@ def notify_nearby_providers_new_booking(db: Session, booking: Booking, pets: lis
         JOIN users u ON u.id = wp.user_id
         WHERE wp.is_online = true
           AND u.is_active = true
+          AND u.profile_review_status = 'clear'
           AND u.service_type = :provider_service_type
           AND (:has_cats = false OR wp.accepts_cats = true)
           AND (:has_ppp = false OR wp.accepts_ppp = true)

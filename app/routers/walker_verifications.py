@@ -201,11 +201,22 @@ def list_pending(
     db: Session = Depends(get_db),
 ):
     query = db.query(WalkerVerification, User).join(User, WalkerVerification.user_id == User.id)
-    if status_filter == "pending":
-        query = query.filter(WalkerVerification.status == WalkerVerificationStatus.PENDING)
+    allowed_statuses = {
+        "pending": WalkerVerificationStatus.PENDING,
+        "approved": WalkerVerificationStatus.APPROVED,
+        "rejected": WalkerVerificationStatus.REJECTED,
+    }
+    if status_filter not in allowed_statuses:
+        raise HTTPException(
+            status_code=422,
+            detail="Filtro de verificacion invalido",
+        )
+    query = query.filter(
+        WalkerVerification.status == allowed_statuses[status_filter]
+    )
 
     results = query.order_by(WalkerVerification.updated_at.desc()).all()
-    return [WalkerVerificationAdminOut.model_validate(_fill_user_data(WalkerVerificationOut.model_validate(v), u).model_dump()) for v, u in results]
+    return [WalkerVerificationAdminOut.model_validate({**_fill_user_data(WalkerVerificationOut.model_validate(v), u).model_dump(), "user_is_active": u.is_active}) for v, u in results]
 
 @router.post("/admin/{verification_id}/approve/{block}", response_model=WalkerVerificationOut)
 def approve_block(
@@ -217,6 +228,13 @@ def approve_block(
     v = db.get(WalkerVerification, verification_id)
     if not v:
         raise HTTPException(status_code=404, detail="Verificacion no encontrada")
+
+    target_user = db.get(User, v.user_id)
+    if target_user is None or not target_user.is_active:
+        raise HTTPException(
+            status_code=409,
+            detail="No se puede aprobar KYC de una cuenta inactiva o inexistente",
+        )
 
     if block == "identity":
         if not all([v.dni_front_url, v.dni_back_url, v.selfie_url]):

@@ -39,7 +39,12 @@ def resolve_profile_review(
         .filter(User.id == admin_id)
         .one_or_none()
     )
-    if admin is None or admin.role != UserRole.ADMIN or not admin.is_active:
+    if (
+        admin is None
+        or admin.role != UserRole.ADMIN
+        or not admin.is_active
+        or admin.profile_review_status != "clear"
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Se requiere autorización administrativa",
@@ -70,6 +75,13 @@ def resolve_profile_review(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Usuario de la solicitud inexistente",
+        )
+
+    # Ningun administrador puede resolver sus propios cambios.
+    if admin.id == user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No podés aprobar ni rechazar tus propios cambios",
         )
 
     review = (

@@ -87,7 +87,7 @@ def _build_message(token: str, title: str, body: str, data: dict | None = None) 
         "data": {
             "title": title,
             "body": body,
-            "channelId": "walks-v6",
+            "channelId": "walks-v7",
             "_contentAvailable": True,
         },
     }

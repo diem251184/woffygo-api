@@ -102,7 +102,33 @@ def update_me(
     from app.models.user import UserRole
     from app.services.profile_review import request_profile_review
 
-    if current_user.role not in (UserRole.OWNER, UserRole.WALKER):
+    if current_user.role == UserRole.ADMIN:
+        from sqlalchemy import text as sql_text
+
+        # Serializar solicitudes administrativas hasta el commit.
+        # Evita que dos administradores queden pending a la vez.
+        db.execute(
+            sql_text("SELECT pg_advisory_xact_lock(:lock_id)"),
+            {"lock_id": 146031},
+        )
+
+        # Debe permanecer otro administrador activo y habilitado.
+        other_admin = (
+            db.query(User.id)
+            .filter(
+                User.role == UserRole.ADMIN,
+                User.is_active.is_(True),
+                User.profile_review_status == "clear",
+                User.id != current_user.id,
+            )
+            .first()
+        )
+        if other_admin is None:
+            raise HTTPException(
+                status_code=409,
+                detail="La edición administrativa requiere otro administrador activo para su revisión",
+            )
+    elif current_user.role not in (UserRole.OWNER, UserRole.WALKER):
         raise HTTPException(
             status_code=403,
             detail="Esta operación no corresponde al perfil de la cuenta",
