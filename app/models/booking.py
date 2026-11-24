@@ -59,6 +59,18 @@ class Booking(Base):
         Geography(geometry_type="POINT", srid=4326), nullable=False
     )
     pickup_address: Mapped[str] = mapped_column(String(255), nullable=False)
+    dropoff_location: Mapped[str | None] = mapped_column(
+        Geography(
+            geometry_type="POINT",
+            srid=4326,
+            spatial_index=False,
+        ),
+        nullable=True,
+    )
+    dropoff_address: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
     duration_minutes: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
 
     price_total: Mapped[Decimal] = mapped_column(
@@ -151,8 +163,25 @@ class Booking(Base):
             return None
 
     @property
+    def dropoff_latitude(self) -> float | None:
+        if self.dropoff_location is None:
+            return None
+        point = to_shape(self.dropoff_location)
+        return float(point.y)
+
+    @property
+    def dropoff_longitude(self) -> float | None:
+        if self.dropoff_location is None:
+            return None
+        point = to_shape(self.dropoff_location)
+        return float(point.x)
+
+    @property
     def current_distance_meters(self) -> Decimal | None:
         return self.distance_meters
+
+
+from sqlalchemy.dialects.postgresql import JSONB
 
 
 class BookingPet(Base):
@@ -166,5 +195,11 @@ class BookingPet(Base):
         ForeignKey("pets.id", ondelete="CASCADE"), nullable=False, index=True
     )
 
+    # Declaraciones historicas al solicitar el servicio.
+    # NULL identifica reservas anteriores sin evidencia historica.
+    conditions_snapshot: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
     booking = relationship("Booking", back_populates="booking_pets")
     pet = relationship("Pet", back_populates="booking_associations")

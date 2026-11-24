@@ -24,6 +24,7 @@ from app.schemas.booking import (
     BookingStatusUpdateRequest,
 )
 from app.services.bookings import (
+    WALK_MAX_RADIUS_KM,
     accept_booking,
     calculate_quote,
     cancel_booking,
@@ -166,6 +167,7 @@ def list_available(
     db: Session = Depends(get_db),
 ):
     from app.services.profile_service_access import ensure_profile_services_enabled
+    from app.services.bookings import is_booking_pet_snapshot_compatible
     ensure_profile_services_enabled(current_user)
     expected_type = (
         ServiceType.WALK if current_user.service_type == "walk"
@@ -198,12 +200,54 @@ def list_available(
             detail="Tu cuenta debe estar verificada para ver solicitudes disponibles",
         )
 
+    # No mostrar nuevas solicitudes mientras el prestador
+    # mantiene un servicio aceptado o en curso.
+    occupied = (
+        db.query(Booking.id)
+        .filter(
+            Booking.provider_id == current_user.id,
+            Booking.status.in_(
+                (BookingStatus.ACCEPTED, BookingStatus.IN_PROGRESS)
+            ),
+        )
+        .first()
+        is not None
+    )
+    if occupied:
+        return []
+
     bookings = (
         db.query(Booking)
         .options(joinedload(Booking.booking_pets).joinedload(BookingPet.pet))
         .filter(Booking.status == BookingStatus.REQUESTED)
         .filter(Booking.provider_id.is_(None))
         .filter(Booking.service_type == service_type)
+        .filter(
+            text(
+                """
+                (
+                    :coverage_transport = true
+                    OR EXISTS (
+                        SELECT 1
+                        FROM walker_profiles wp
+                        WHERE wp.user_id = :coverage_provider_id
+                          AND wp.current_location IS NOT NULL
+                          AND wp.search_radius_km > 0
+                          AND ST_DWithin(
+                              wp.current_location,
+                              bookings.pickup_location,
+                              LEAST(wp.search_radius_km, :coverage_max_radius_km) * 1000
+                          )
+                    )
+                )
+                """
+            )
+        )
+        .params(
+            coverage_transport=(service_type == ServiceType.TRANSPORT),
+            coverage_provider_id=current_user.id,
+            coverage_max_radius_km=WALK_MAX_RADIUS_KM,
+        )
         .order_by(Booking.created_at.asc())
         .all()
     )
@@ -220,6 +264,9 @@ def list_available(
             if service_type == ServiceType.WALK and pet.species != "dog":
                 compatible = False
                 break
+            if pet.has_special_needs and not profile.accepts_special_needs:
+                compatible = False
+                break
             if pet.species == "cat" and (pet.is_ppp is True or not profile.accepts_cats):
                 compatible = False
                 break
@@ -228,6 +275,13 @@ def list_available(
             ):
                 compatible = False
                 break
+        if compatible:
+            compatible = all(
+                is_booking_pet_snapshot_compatible(
+                    association, profile, booking.service_type
+                )
+                for association in booking.booking_pets
+            )
         if compatible:
             compatible_bookings.append(booking)
     bookings = compatible_bookings
@@ -263,8 +317,12 @@ def get_one(
     is_admin = current_user.role == UserRole.ADMIN
 
     # Paseador elegible: solo si tiene rol WALKER, está online, verificado y la reserva está libre
+    from app.services.bookings import is_booking_pet_snapshot_compatible
     is_eligible_candidate = False
     if current_user.role == UserRole.WALKER and booking.status == BookingStatus.REQUESTED and booking.provider_id is None:
+        from app.services.profile_service_access import ensure_profile_services_enabled
+        ensure_profile_services_enabled(current_user)
+
         profile = db.query(WalkerProfile).filter(WalkerProfile.user_id == current_user.id).first()
         if profile and profile.is_online:
             verification = (
@@ -289,6 +347,9 @@ def get_one(
                         if booking.service_type == ServiceType.WALK and pet.species != "dog":
                             compatible = False
                             break
+                        if pet.has_special_needs and not profile.accepts_special_needs:
+                            compatible = False
+                            break
                         if pet.species == "cat" and (pet.is_ppp is True or not profile.accepts_cats):
                             compatible = False
                             break
@@ -297,7 +358,55 @@ def get_one(
                         ):
                             compatible = False
                             break
+                    if compatible:
+                        compatible = all(
+                            is_booking_pet_snapshot_compatible(
+                                association, profile, booking.service_type
+                            )
+                            for association in booking.booking_pets
+                        )
+                    if compatible and booking.service_type == ServiceType.WALK:
+                        within_coverage = db.execute(
+                            text(
+                                """
+                                SELECT ST_DWithin(
+                                    wp.current_location,
+                                    b.pickup_location,
+                                    LEAST(wp.search_radius_km, :max_radius_km) * 1000
+                                )
+                                FROM walker_profiles wp
+                                JOIN bookings b ON b.id = :booking_id
+                                WHERE wp.user_id = :provider_id
+                                  AND wp.current_location IS NOT NULL
+                                  AND wp.search_radius_km > 0
+                                """
+                            ),
+                            {
+                                "booking_id": booking.id,
+                                "provider_id": current_user.id,
+                                "max_radius_km": WALK_MAX_RADIUS_KM,
+                            },
+                        ).scalar()
+                        compatible = within_coverage is True
+
                     is_eligible_candidate = compatible
+
+    # Un candidato ocupado no puede acceder a una solicitud
+    # que tampoco estaria autorizado a aceptar.
+    if is_eligible_candidate:
+        occupied = (
+            db.query(Booking.id)
+            .filter(
+                Booking.provider_id == current_user.id,
+                Booking.status.in_(
+                    (BookingStatus.ACCEPTED, BookingStatus.IN_PROGRESS)
+                ),
+            )
+            .first()
+            is not None
+        )
+        if occupied:
+            is_eligible_candidate = False
 
     if not (is_owner or is_provider or is_admin or is_eligible_candidate):
         raise HTTPException(status_code=403, detail="Sin acceso a esta reserva")

@@ -1,6 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from app.models.booking import ServiceType, BookingStatus
 from app.schemas.pet import PetResponse
 
@@ -8,11 +8,11 @@ from app.schemas.pet import PetResponse
 class BookingCreate(BaseModel):
     service_type: ServiceType = ServiceType.WALK
     pet_ids: list[int] = Field(..., min_items=1, max_items=3)
-    pickup_latitude: float
-    pickup_longitude: float
+    pickup_latitude: float = Field(..., ge=-90, le=90, allow_inf_nan=False)
+    pickup_longitude: float = Field(..., ge=-180, le=180, allow_inf_nan=False)
     pickup_address: str
-    dropoff_latitude: float | None = None
-    dropoff_longitude: float | None = None
+    dropoff_latitude: float | None = Field(default=None, ge=-90, le=90, allow_inf_nan=False)
+    dropoff_longitude: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False)
     dropoff_address: str | None = None
     duration_minutes: int = Field(default=30, ge=15, le=180)
     notes: str | None = None
@@ -43,6 +43,15 @@ class BookingStatusUpdateRequest(BaseModel):
     reason: str | None = None
 
 
+class BookingPetConditionsAtRequest(BaseModel):
+    """Condiciones originales de una mascota asociada a una reserva."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    pet_id: int
+    conditions_snapshot: dict[str, str | bool | None] | None = None
+
+
 class BookingResponse(BaseModel):
     id: int
     owner_id: int
@@ -70,8 +79,15 @@ class BookingResponse(BaseModel):
     flag_reason: str | None
     distance_meters: Decimal | None
     pets: list[PetResponse] = []
+    pet_conditions_at_request: list[BookingPetConditionsAtRequest] = Field(
+        default_factory=list,
+        validation_alias="booking_pets",
+    )
     pickup_latitude: float | None = None
     pickup_longitude: float | None = None
+    dropoff_address: str | None = None
+    dropoff_latitude: float | None = None
+    dropoff_longitude: float | None = None
     current_distance_meters: Decimal | None = None
 
     class Config:

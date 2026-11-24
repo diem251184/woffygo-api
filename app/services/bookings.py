@@ -95,7 +95,16 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
             detail=f"Debes seleccionar entre 1 y {MAX_PETS} mascotas",
         )
 
-    pets = db.query(Pet).filter(Pet.id.in_(payload.pet_ids)).all()
+    # Bloquear mascotas en orden estable hasta confirmar la reserva.
+    # Coordina con update_pet y evita validar condiciones obsoletas.
+    pets = (
+        db.query(Pet)
+        .filter(Pet.id.in_(payload.pet_ids))
+        .order_by(Pet.id.asc())
+        .with_for_update()
+        .populate_existing()
+        .all()
+    )
     if len(pets) != len(payload.pet_ids):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -135,9 +144,18 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Completa la declaracion PPP de {pet.name} antes de reservar.",
             )
+        if pet.has_special_needs and not (pet.notes or "").strip():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Completá las necesidades especiales y los cuidados "
+                    f"requeridos de {pet.name} en Mis Mascotas antes de reservar."
+                ),
+            )
 
     num_pets = len(pets)
     distance_meters: Decimal | None = None
+    destination_address: str | None = None
 
     if payload.service_type == ServiceType.TRANSPORT:
         if (
@@ -148,6 +166,13 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Woofy Traslados requiere coordenadas de destino validas",
             )
+        destination_address = (payload.dropoff_address or "").strip()
+        if not destination_address or len(destination_address) > 255:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Woofy Traslados requiere una direccion de destino valida de hasta 255 caracteres",
+            )
+
         dist_km = get_driving_distance_km(
             payload.pickup_latitude,
             payload.pickup_longitude,
@@ -159,6 +184,35 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
     else:
         price_total = walk_price(payload.duration_minutes, num_pets)
 
+    # El telefono informa el importe que el dueno vio y confirmo.
+    # El servidor calcula siempre el precio oficial y exige coincidencia.
+    if payload.service_type == ServiceType.TRANSPORT:
+        if payload.estimated_price is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Necesitas confirmar una cotizacion vigente antes de solicitar el traslado.",
+            )
+        if (
+            not payload.estimated_price.is_finite()
+            or payload.estimated_price <= Decimal("0.00")
+            or payload.estimated_price != price_total
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="El precio del traslado cambio. Actualiza la cotizacion y confirma nuevamente.",
+            )
+
+    booking_notes = (
+        f"Destino: {destination_address}" + (f" | {payload.notes}" if payload.notes else "")
+        if payload.service_type == ServiceType.TRANSPORT and destination_address
+        else payload.notes
+    )
+    if booking_notes is not None and len(booking_notes) > 500:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Las observaciones superan el limite de 500 caracteres.",
+        )
+
     now = _now()
     booking = Booking(
         owner_id=owner.id,
@@ -167,12 +221,14 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
         status=BookingStatus.REQUESTED,
         pickup_location=_make_point(payload.pickup_latitude, payload.pickup_longitude),
         pickup_address=payload.pickup_address,
-        duration_minutes=payload.duration_minutes,
-        notes=(
-            f"Destino: {payload.dropoff_address}" + (f" | {payload.notes}" if payload.notes else "")
-            if payload.service_type == ServiceType.TRANSPORT and payload.dropoff_address
-            else payload.notes
+        dropoff_location=(
+            _make_point(payload.dropoff_latitude, payload.dropoff_longitude)
+            if payload.service_type == ServiceType.TRANSPORT
+            else None
         ),
+        dropoff_address=destination_address,
+        duration_minutes=payload.duration_minutes,
+        notes=booking_notes,
         price_total=price_total,
         platform_fee=Decimal("0.00"),
         provider_earnings=Decimal("0.00"),
@@ -184,7 +240,21 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
     db.flush()
 
     for pet in pets:
-        db.add(BookingPet(booking_id=booking.id, pet_id=pet.id))
+        db.add(
+            BookingPet(
+                booking_id=booking.id,
+                pet_id=pet.id,
+                conditions_snapshot={
+                    "name": pet.name,
+                    "species": pet.species,
+                    "is_ppp": pet.is_ppp,
+                    "has_special_needs": pet.has_special_needs,
+                    "notes": pet.notes,
+                    "aggressive_with_dogs": pet.aggressive_with_dogs,
+                    "aggressive_with_people": pet.aggressive_with_people,
+                },
+            )
+        )
 
     db.commit()
     db.refresh(booking)
@@ -196,6 +266,62 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
 
     return booking
 
+
+def is_booking_pet_snapshot_compatible(
+    association: BookingPet,
+    profile: WalkerProfile,
+    service_type: ServiceType,
+) -> bool:
+    """Conserva restricciones declaradas al reservar.
+
+    Las verificaciones de condiciones actuales se mantienen
+    en los puntos de acceso y aceptacion existentes.
+    """
+    snapshot = association.conditions_snapshot
+
+    # Reserva anterior a CL145: no inventar condiciones historicas.
+    # Los controles actuales siguen siendo obligatorios.
+    if snapshot is None:
+        return True
+
+    if not isinstance(snapshot, dict):
+        return False
+
+    pet = association.pet
+    species = snapshot.get("species")
+
+    if (
+        pet is None
+        or species not in ("dog", "cat")
+        or pet.species != species
+        or service_type not in (ServiceType.WALK, ServiceType.TRANSPORT)
+    ):
+        return False
+
+    if service_type == ServiceType.WALK and species != "dog":
+        return False
+
+    special = snapshot.get("has_special_needs")
+    if not isinstance(special, bool):
+        return False
+    if special and not profile.accepts_special_needs:
+        return False
+
+    ppp = snapshot.get("is_ppp")
+
+    if species == "cat":
+        return (
+            (ppp is False or ppp is None)
+            and bool(profile.accepts_cats)
+        )
+
+    if not isinstance(ppp, bool):
+        return False
+
+    if ppp and not profile.accepts_ppp:
+        return False
+
+    return True
 
 def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
     from app.services.profile_service_access import ensure_profile_services_enabled
@@ -240,6 +366,20 @@ def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Tu cuenta debe estar verificada por un administrador para aceptar solicitudes",
+        )
+
+    # Serializar aceptaciones del mismo prestador en la transaccion.
+    # Bloquear solo la reserva no impide aceptar dos reservas distintas.
+    locked_provider = (
+        db.query(User)
+        .filter(User.id == provider.id)
+        .with_for_update()
+        .first()
+    )
+    if locked_provider is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="El prestador no esta disponible.",
         )
 
     # 4. Validar que el paseador no tenga ya un servicio en curso
@@ -311,6 +451,17 @@ def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
                     detail="El prestador no acepta perros declarados PPP.",
                 )
 
+    # Verificar tambien las condiciones originales de la reserva.
+    # No permitir que una edicion posterior elimine restricciones.
+    for association in booking.booking_pets:
+        if not is_booking_pet_snapshot_compatible(
+            association, profile, booking.service_type
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Las condiciones originales de la reserva no son compatibles con este prestador.",
+            )
+
     # Cobertura obligatoria antes de aceptar un paseo.
     if booking.service_type == ServiceType.WALK:
         within_coverage = db.execute(
@@ -340,15 +491,22 @@ def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
                 detail="La solicitud esta fuera de tu cobertura o no tenes ubicacion disponible.",
             )
 
-    num_pets = len(booking.booking_pets)
-    dist_km = (booking.distance_meters / Decimal("1000")) if booking.distance_meters else None
+    # El precio aceptado debe ser el registrado al solicitar la reserva.
+    # Recalcularlo aqui podria modificar el importe informado al propietario.
+    price_total = booking.price_total
+    if (
+        price_total is None
+        or not price_total.is_finite()
+        or price_total <= Decimal("0.00")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="La reserva no tiene un precio valido. Requiere revision.",
+        )
 
-    price_total, fee, earnings = calculate_quote(
-        booking.service_type,
-        booking.duration_minutes,
-        num_pets,
-        dist_km,
-    )
+    fee_rate = get_platform_fee_rate()
+    fee = (price_total * fee_rate).quantize(Decimal("0.01"))
+    earnings = price_total - fee
 
     booking.provider_id = provider.id
     booking.status = BookingStatus.ACCEPTED
@@ -381,6 +539,23 @@ def start_booking(db: Session, provider: User, booking_id: int) -> Booking:
             detail="No estás asignado a esta reserva",
         )
     validate_status_transition(booking.status, BookingStatus.IN_PROGRESS)
+
+    # Revalidar habilitacion y KYC en el momento real de inicio.
+    # La aprobacion al aceptar no sustituye este control.
+    from app.services.profile_service_access import ensure_profile_services_enabled
+    ensure_profile_services_enabled(provider)
+
+    verification = (
+        db.query(WalkerVerification)
+        .filter(WalkerVerification.user_id == provider.id)
+        .order_by(WalkerVerification.id.desc())
+        .first()
+    )
+    if not is_kyc_operationally_approved(verification, provider.service_type):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tu cuenta debe estar verificada por un administrador para iniciar el servicio.",
+        )
 
     payment = db.query(Payment).filter(Payment.booking_id == booking.id).first()
     if payment is None or payment.status != PaymentStatus.APPROVED:
@@ -468,6 +643,12 @@ def notify_nearby_providers_new_booking(db: Session, booking: Booking, pets: lis
           AND u.is_active = true
           AND u.profile_review_status = 'clear'
           AND u.service_type = :provider_service_type
+          AND NOT EXISTS (
+              SELECT 1
+              FROM bookings active_b
+              WHERE active_b.provider_id = wp.user_id
+                AND active_b.status IN (:accepted_status, :in_progress_status)
+          )
           AND (:has_cats = false OR wp.accepts_cats = true)
           AND (:has_ppp = false OR wp.accepts_ppp = true)
           AND (:has_special_needs = false OR wp.accepts_special_needs = true)
@@ -484,19 +665,66 @@ def notify_nearby_providers_new_booking(db: Session, booking: Booking, pets: lis
           )
         """
     )
+    # Conservar las restricciones declaradas al crear la reserva.
+    # Los datos actuales de las mascotas siguen siendo obligatorios.
+    snapshots = tuple(
+        association.conditions_snapshot
+        for association in booking.booking_pets
+        if isinstance(association.conditions_snapshot, dict)
+    )
+
     rows = db.execute(
         sql,
         {
             "booking_id": booking.id,
             "is_transport": is_transport,
             "provider_service_type": "transport" if is_transport else "walk",
-            "has_cats": any(p.species == "cat" for p in pets),
-            "has_ppp": any(p.species == "dog" and p.is_ppp is True for p in pets),
-            "has_special_needs": any(p.has_special_needs is True for p in pets),
+            "accepted_status": BookingStatus.ACCEPTED.value,
+            "in_progress_status": BookingStatus.IN_PROGRESS.value,
+            "has_cats": (
+                any(p.species == "cat" for p in pets)
+                or any(s.get("species") == "cat" for s in snapshots)
+            ),
+            "has_ppp": (
+                any(p.species == "dog" and p.is_ppp is True for p in pets)
+                or any(
+                    s.get("species") == "dog" and s.get("is_ppp") is True
+                    for s in snapshots
+                )
+            ),
+            "has_special_needs": (
+                any(p.has_special_needs is True for p in pets)
+                or any(s.get("has_special_needs") is True for s in snapshots)
+            ),
             "walk_max_radius_km": WALK_MAX_RADIUS_KM,
         },
     ).all()
-    user_ids = [r.user_id for r in rows]
+    candidate_ids = [r.user_id for r in rows]
+
+    # Solo notificar a prestadores con KYC operativo aprobado.
+    # Reutilizar la misma validacion aplicada al aceptar.
+    user_ids = []
+    if candidate_ids:
+        verifications = (
+            db.query(WalkerVerification)
+            .filter(WalkerVerification.user_id.in_(candidate_ids))
+            .all()
+        )
+        verification_by_user = {
+            verification.user_id: verification
+            for verification in verifications
+        }
+        required_service = "transport" if is_transport else "walk"
+
+        user_ids = [
+            user_id
+            for user_id in candidate_ids
+            if is_kyc_operationally_approved(
+                verification_by_user.get(user_id),
+                required_service,
+            )
+        ]
+
     if user_ids:
         pets_names = ", ".join(p.name for p in pets)
         if is_transport:

@@ -26,6 +26,12 @@ def _ensure_owner(pet: Pet, user: User) -> None:
 
 
 def create_pet(db: Session, owner: User, payload: PetCreate) -> Pet:
+    if payload.has_special_needs and not (payload.notes or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Describí las necesidades especiales y los cuidados requeridos antes de guardar la mascota.",
+        )
+
     pet = Pet(
         owner_id=owner.id,
         name=payload.name,
@@ -63,7 +69,19 @@ def get_pet(db: Session, pet_id: int, user: User) -> Pet:
 
 
 def update_pet(db: Session, pet_id: int, user: User, payload: PetUpdate) -> Pet:
-    pet = _get_pet_or_404(db, pet_id)
+    # Serializar ediciones sensibles con la creacion de reservas.
+    pet = (
+        db.query(Pet)
+        .filter(Pet.id == pet_id)
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+    if pet is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Mascota no encontrada",
+        )
     _ensure_owner(pet, user)
 
     next_species = payload.species if "species" in payload.model_fields_set else pet.species
@@ -81,6 +99,70 @@ def update_pet(db: Session, pet_id: int, user: User, payload: PetUpdate) -> Pet:
             detail="Un gato no puede declararse como PPP. Revisá la especie y la declaración.",
         )
 
+    next_special_needs = (
+        payload.has_special_needs
+        if "has_special_needs" in payload.model_fields_set
+        else pet.has_special_needs
+    )
+    next_notes = (
+        payload.notes
+        if "notes" in payload.model_fields_set
+        else pet.notes
+    )
+
+    if next_special_needs is True and not (next_notes or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Describí las necesidades especiales y los cuidados requeridos antes de guardar la mascota.",
+        )
+
+    # PROTECCION_CONDICIONES_RESERVAS_ACTIVAS
+    # Evitar cambios silenciosos de condiciones relevantes durante una reserva activa.
+    from app.models.booking import Booking, BookingPet, BookingStatus
+
+    sensitive_change = (
+        next_ppp != pet.is_ppp
+        or next_special_needs != pet.has_special_needs
+        or next_notes != pet.notes
+        or (
+            payload.aggressive_with_dogs is not None
+            and payload.aggressive_with_dogs != pet.aggressive_with_dogs
+        )
+        or (
+            payload.aggressive_with_people is not None
+            and payload.aggressive_with_people != pet.aggressive_with_people
+        )
+    )
+
+    if sensitive_change:
+        active_booking_exists = (
+            db.query(Booking.id)
+            .join(BookingPet, BookingPet.booking_id == Booking.id)
+            .filter(
+                BookingPet.pet_id == pet.id,
+                Booking.status.in_(
+                    (
+                        BookingStatus.REQUESTED,
+                        BookingStatus.ACCEPTED,
+                        BookingStatus.IN_PROGRESS,
+                    )
+                ),
+            )
+            .first()
+            is not None
+        )
+
+        if active_booking_exists:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Esta mascota tiene una reserva activa. No se pueden "
+                    "modificar sus condiciones PPP, necesidades especiales "
+                    "u observaciones de seguridad mientras esa reserva "
+                    "permanezca activa. Contactá a soporte si cambió "
+                    "alguna condición que afecte el servicio."
+                ),
+            )
     pet.species = next_species
     pet.is_ppp = next_ppp
 
