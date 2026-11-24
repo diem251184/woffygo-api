@@ -98,7 +98,7 @@ def select_authenticated_kyc_document(
 
     prefix = (
         r"/[a-zA-Z0-9_-]+/image/authenticated/"
-        r"v[0-9]+/woffygo/kyc/"
+        r"(?:s--[A-Za-z0-9_-]+--/)?v[0-9]+/woffygo/kyc/"
         + str(user_id)
         + r"/"
     )
