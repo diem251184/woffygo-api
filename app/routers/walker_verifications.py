@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, date
+from fastapi import Form
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
@@ -90,10 +91,10 @@ async def upload_identity(
 
 @router.post("/upload/license", response_model=WalkerVerificationOut)
 async def upload_license(
-    license_number: str,
-    license_class: str,
-    license_jurisdiction: str,
-    license_expiration: str,
+    license_number: str = Form(...),
+    license_class: str = Form(...),
+    license_jurisdiction: str = Form(...),
+    license_expiration: str = Form(...),
     license_front: UploadFile = File(...),
     license_back: UploadFile = File(...),
     current_user: User = Depends(require_role(UserRole.WALKER)),
@@ -131,10 +132,10 @@ async def upload_license(
 
 @router.post("/upload/vehicle", response_model=WalkerVerificationOut)
 async def upload_vehicle(
-    vehicle_plate: str,
-    vehicle_brand: str,
-    vehicle_model: str,
-    vehicle_year: int,
+    vehicle_plate: str = Form(...),
+    vehicle_brand: str = Form(...),
+    vehicle_model: str = Form(...),
+    vehicle_year: int = Form(...),
     vehicle_photo: UploadFile = File(...),
     vehicle_cedula: UploadFile = File(...),
     vehicle_insurance: UploadFile = File(None),
