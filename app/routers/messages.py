@@ -28,20 +28,19 @@ class WalkWrapper:
     def __init__(self, obj):
         self.id = obj.id
         self.owner_id = obj.owner_id
-        self.walker_id = getattr(obj, "provider_id", getattr(obj, "walker_id", None))
+        self.provider_id = obj.provider_id
+        self.walker_id = self.provider_id
         raw_st = obj.status.value if hasattr(obj.status, "value") else str(obj.status)
         self.status_val = raw_st.upper()
 
 def _get_walk_or_404(db: Session, walk_id: int):
-    walk = db.get(Walk, walk_id)
-    if walk is not None:
-        return WalkWrapper(walk)
+    # messages.walk_id referencia exclusivamente bookings.id.
     booking = db.get(Booking, walk_id)
     if booking is not None:
         return WalkWrapper(booking)
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
-        detail="Paseo o reserva no encontrado",
+        detail="Reserva no encontrada",
     )
 
 
@@ -71,7 +70,7 @@ def send_message(
     if current_user.role != UserRole.ADMIN and walk.status_val not in allowed:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"El chat no esta disponible en estado {walk.status.value}",
+            detail=f"El chat no esta disponible en estado {walk.status_val}",
         )
 
     filtered, was_blocked, reason = filter_contact_info(payload.text)

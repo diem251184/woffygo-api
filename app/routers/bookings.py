@@ -58,6 +58,55 @@ def _attach_extra_fields(db: Session, booking: Booking) -> None:
         booking._pickup_longitude = float(row.lon) if row.lon is not None else None
 
 
+@router.get("/unread-message-ids", response_model=dict[str, list[int]])
+def list_unread_message_ids(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, list[int]]:
+    """Identificadores pendientes del participante autenticado."""
+    from sqlalchemy import or_
+    from app.models.message import Message
+
+    if current_user.role not in (
+        UserRole.OWNER,
+        UserRole.WALKER,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso no autorizado.",
+        )
+
+    rows = (
+        db.query(
+            Message.walk_id,
+            Message.id,
+        )
+        .join(
+            Booking,
+            Booking.id == Message.walk_id,
+        )
+        .filter(
+            or_(
+                Booking.owner_id == current_user.id,
+                Booking.provider_id == current_user.id,
+            ),
+            Message.sender_id != current_user.id,
+            Message.read_at.is_(None),
+        )
+        .order_by(Message.walk_id, Message.id)
+        .all()
+    )
+
+    result: dict[str, list[int]] = {}
+
+    for booking_id, message_id in rows:
+        result.setdefault(str(booking_id), []).append(
+            int(message_id)
+        )
+
+    return result
+
+
 @router.get("/unread-counts", response_model=dict[str, int])
 def list_unread_counts(
     current_user: User = Depends(get_current_user),
