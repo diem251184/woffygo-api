@@ -95,3 +95,4 @@ class WalkerVerificationAdminOut(BaseModel):
     user_birth_date: date | None = None
     user_emergency_contact: str | None = None
     user_is_active: bool
+    user_service_type: str | None = None

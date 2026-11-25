@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, date
 from fastapi import Form
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -21,6 +21,29 @@ from app.services import admin_log, email, push
 from app.services.cloudinary_service import upload_kyc_document, delete_kyc_attempt
 
 router = APIRouter(prefix="/walker-verifications", tags=["walker-verifications"])
+def _assert_review_version(v: WalkerVerification, reviewed_version: str) -> None:
+    """Rechaza decisiones sobre documentacion modificada."""
+    try:
+        expected = datetime.fromisoformat(
+            reviewed_version.replace("Z", "+00:00")
+        )
+    except (AttributeError, TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="Version documental invalida.")
+
+    current = v.updated_at
+    if (
+        current is None
+        or current.tzinfo is None
+        or expected.tzinfo is None
+        or current.utcoffset() is None
+        or expected.utcoffset() is None
+        or current != expected
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="La documentacion cambio. Actualiza la ficha y revisala nuevamente.",
+        )
+
 
 def _suspend_provider_availability(db: Session, user_id: int) -> None:
     """Desactiva disponibilidad en la misma transaccion del cambio KYC."""
@@ -73,6 +96,7 @@ async def upload_identity(
         v.status = WalkerVerificationStatus.PENDING
         _suspend_provider_availability(db, current_user.id)
         v.identity_rejection_reason = None
+        v.rejection_reason = None
         commit_attempted = True
         db.commit()
     except Exception as e:
@@ -114,6 +138,7 @@ async def upload_license(
         v.status = WalkerVerificationStatus.PENDING
         _suspend_provider_availability(db, current_user.id)
         v.license_rejection_reason = None
+        v.rejection_reason = None
         commit_attempted = True
         db.commit()
     except Exception as e:
@@ -161,6 +186,7 @@ async def upload_vehicle(
         v.status = WalkerVerificationStatus.PENDING
         _suspend_provider_availability(db, current_user.id)
         v.vehicle_rejection_reason = None
+        v.rejection_reason = None
         commit_attempted = True
         db.commit()
     except Exception as e:
@@ -217,16 +243,17 @@ def list_pending(
     )
 
     results = query.order_by(WalkerVerification.updated_at.desc()).all()
-    return [WalkerVerificationAdminOut.model_validate({**_fill_user_data(WalkerVerificationOut.model_validate(v), u).model_dump(), "user_is_active": u.is_active}) for v, u in results]
+    return [WalkerVerificationAdminOut.model_validate({**_fill_user_data(WalkerVerificationOut.model_validate(v), u).model_dump(), "user_is_active": u.is_active, "user_service_type": u.service_type}) for v, u in results]
 
 @router.post("/admin/{verification_id}/approve/{block}", response_model=WalkerVerificationOut)
 def approve_block(
     verification_id: int,
     block: str,
+    expected_updated_at: str = Header(..., alias="X-KYC-Reviewed-At"),
     current_user: User = Depends(require_role(UserRole.ADMIN)),
     db: Session = Depends(get_db),
 ):
-    v = db.get(WalkerVerification, verification_id)
+    v = db.get(WalkerVerification, verification_id, with_for_update=True, populate_existing=True)
     if not v:
         raise HTTPException(status_code=404, detail="Verificacion no encontrada")
 
@@ -237,11 +264,26 @@ def approve_block(
             detail="No se puede aprobar KYC de una cuenta inactiva o inexistente",
         )
 
+    if target_user.service_type not in ("walk", "transport"):
+        raise HTTPException(status_code=422, detail="Tipo de servicio KYC no permitido.")
+
+    if v.status != WalkerVerificationStatus.PENDING:
+        raise HTTPException(status_code=409, detail="La solicitud KYC no esta pendiente.")
+
+    _assert_review_version(v, expected_updated_at)
+
     if block == "identity":
+        if v.identity_status != DocumentStatus.PENDING:
+            raise HTTPException(status_code=409, detail="La identidad no esta pendiente de revision.")
         if not all([v.dni_front_url, v.dni_back_url, v.selfie_url]):
             raise HTTPException(status_code=422, detail="No se puede aprobar la identidad sin DNI frente, DNI dorso y selfie.")
         v.identity_status = DocumentStatus.APPROVED
+        v.identity_rejection_reason = None
     elif block == "license":
+        if target_user.service_type != "transport":
+            raise HTTPException(status_code=422, detail="La licencia no aplica a este servicio.")
+        if v.license_status != DocumentStatus.PENDING:
+            raise HTTPException(status_code=409, detail="La licencia no esta pendiente de revision.")
         required_license = [
             v.license_number,
             v.license_class,
@@ -265,7 +307,12 @@ def approve_block(
                 detail="No se puede aprobar una licencia vencida.",
             )
         v.license_status = DocumentStatus.APPROVED
+        v.license_rejection_reason = None
     elif block == "vehicle":
+        if target_user.service_type != "transport":
+            raise HTTPException(status_code=422, detail="El vehiculo no aplica a este servicio.")
+        if v.vehicle_status != DocumentStatus.PENDING:
+            raise HTTPException(status_code=409, detail="El vehiculo no esta pendiente de revision.")
         vehicle_user = db.get(User, v.user_id)
         if vehicle_user is None:
             raise HTTPException(status_code=404, detail="Usuario del prestador no encontrado.")
@@ -295,6 +342,7 @@ def approve_block(
                 detail="No se puede aprobar el vehículo de Woofy Traslados sin seguro registrado.",
             )
         v.vehicle_status = DocumentStatus.APPROVED
+        v.vehicle_rejection_reason = None
     else:
         raise HTTPException(status_code=400, detail="Bloque invalido")
 
@@ -304,14 +352,19 @@ def approve_block(
     if target_user and target_user.service_type == "transport":
         is_approved = is_approved and (v.license_status == DocumentStatus.APPROVED) and (v.vehicle_status == DocumentStatus.APPROVED)
 
+    notify_approval = is_approved and v.status != WalkerVerificationStatus.APPROVED
     if is_approved:
         v.status = WalkerVerificationStatus.APPROVED
         v.reviewed_at = datetime.now(timezone.utc)
+    else:
+        v.status = WalkerVerificationStatus.PENDING
+        v.reviewed_at = None
+    v.rejection_reason = None
 
     db.commit()
     db.refresh(v)
 
-    if is_approved and target_user:
+    if notify_approval and target_user:
         try:
             push.send_to_user(db=db, user_id=target_user.id, title="Cuenta Aprobada", body="Tu cuenta esta 100% verificada. Ya podes operar.", data={"type": "kyc_approved"})
         except Exception:
@@ -325,20 +378,41 @@ def reject_block(
     verification_id: int,
     block: str,
     body: RejectRequest,
+    expected_updated_at: str = Header(..., alias="X-KYC-Reviewed-At"),
     current_user: User = Depends(require_role(UserRole.ADMIN)),
     db: Session = Depends(get_db),
 ):
-    v = db.get(WalkerVerification, verification_id)
+    v = db.get(WalkerVerification, verification_id, with_for_update=True, populate_existing=True)
     if not v:
         raise HTTPException(status_code=404, detail="Verificacion no encontrada")
 
+    target_user = db.get(User, v.user_id)
+    if target_user is None or not target_user.is_active:
+        raise HTTPException(status_code=409, detail="Cuenta inactiva o inexistente.")
+    if target_user.service_type not in ("walk", "transport"):
+        raise HTTPException(status_code=422, detail="Tipo de servicio KYC no permitido.")
+    if v.status != WalkerVerificationStatus.PENDING:
+        raise HTTPException(status_code=409, detail="La solicitud KYC no esta pendiente.")
+
+    _assert_review_version(v, expected_updated_at)
+
     if block == "identity":
+        if v.identity_status != DocumentStatus.PENDING:
+            raise HTTPException(status_code=409, detail="Identidad no pendiente.")
         v.identity_status = DocumentStatus.REJECTED
         v.identity_rejection_reason = body.reason
     elif block == "license":
+        if target_user.service_type != "transport":
+            raise HTTPException(status_code=422, detail="Licencia no aplicable.")
+        if v.license_status != DocumentStatus.PENDING:
+            raise HTTPException(status_code=409, detail="Licencia no pendiente.")
         v.license_status = DocumentStatus.REJECTED
         v.license_rejection_reason = body.reason
     elif block == "vehicle":
+        if target_user.service_type != "transport":
+            raise HTTPException(status_code=422, detail="Vehiculo no aplicable.")
+        if v.vehicle_status != DocumentStatus.PENDING:
+            raise HTTPException(status_code=409, detail="Vehiculo no pendiente.")
         v.vehicle_status = DocumentStatus.REJECTED
         v.vehicle_rejection_reason = body.reason
     else:
@@ -349,9 +423,12 @@ def reject_block(
     db.commit()
     db.refresh(v)
 
-    target_user = db.get(User, v.user_id)
     if target_user:
-        push.send_to_user(db=db, user_id=target_user.id, title="Documento Rechazado", body=f"Motivo: {body.reason}.", data={"type": "kyc_rejected"})
+        try:
+            push.send_to_user(db=db, user_id=target_user.id, title="Documento Rechazado", body=f"Motivo: {body.reason}.", data={"type": "kyc_rejected"})
+        except Exception:
+            # El rechazo confirmado no depende del servicio push.
+            pass
 
     return _fill_user_data(WalkerVerificationOut.model_validate(v), target_user)
 
