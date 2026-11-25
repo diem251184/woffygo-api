@@ -89,6 +89,35 @@ def calculate_quote(
 def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
     from app.services.profile_service_access import ensure_profile_services_enabled
     ensure_profile_services_enabled(owner)
+    scheduled_pickup = payload.scheduled_pickup_at
+
+    if payload.service_type == ServiceType.TRANSPORT:
+        if scheduled_pickup is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Indica la fecha y hora programadas de retiro.",
+            )
+
+        if scheduled_pickup.utcoffset() is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="El horario de retiro debe incluir zona horaria.",
+            )
+
+        scheduled_pickup = scheduled_pickup.astimezone(timezone.utc)
+
+        if scheduled_pickup <= _now():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="El horario de retiro debe ser futuro.",
+            )
+    else:
+        if scheduled_pickup is not None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="El horario programado corresponde a Woofy Traslados.",
+            )
+
     if len(payload.pet_ids) == 0 or len(payload.pet_ids) > MAX_PETS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -234,6 +263,7 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
         provider_earnings=Decimal("0.00"),
         distance_meters=distance_meters,
         requested_at=now,
+        scheduled_pickup_at=scheduled_pickup,
         flagged_for_review=False,
     )
     db.add(booking)

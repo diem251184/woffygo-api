@@ -6,6 +6,7 @@ from app.schemas.pet import PetResponse
 
 
 class BookingCreate(BaseModel):
+    scheduled_pickup_at: datetime | None = None
     service_type: ServiceType = ServiceType.WALK
     pet_ids: list[int] = Field(..., min_items=1, max_items=3)
     pickup_latitude: float = Field(..., ge=-90, le=90, allow_inf_nan=False)
@@ -69,6 +70,7 @@ class BookingResponse(BaseModel):
     notes: str | None
     cancel_reason: str | None
     requested_at: datetime
+    scheduled_pickup_at: datetime | None = None
     accepted_at: datetime | None
     started_at: datetime | None
     finished_at: datetime | None
