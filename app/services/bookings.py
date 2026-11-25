@@ -594,8 +594,26 @@ def start_booking(db: Session, provider: User, booking_id: int) -> Booking:
             detail="El servicio no puede iniciarse sin pago aprobado",
         )
 
+    # Un pago aprobado no autoriza un traslado anticipado.
+    started_now = _now()
+
+    if booking.service_type == ServiceType.TRANSPORT:
+        scheduled = booking.scheduled_pickup_at
+
+        if scheduled is None or scheduled.utcoffset() is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="El traslado no tiene un horario de retiro valido.",
+            )
+
+        if started_now < scheduled.astimezone(timezone.utc):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Todavia no llego el horario programado de retiro.",
+            )
+
     booking.status = BookingStatus.IN_PROGRESS
-    booking.started_at = _now()
+    booking.started_at = started_now
     db.commit()
     db.refresh(booking)
     return booking

@@ -97,17 +97,20 @@ def send_message(
             recipient_id = walk.owner_id
 
         if recipient_id is not None:
-            preview = filtered[:80] + ("..." if len(filtered) > 80 else "")
-            sender_name = current_user.full_name
             push.send_to_user(
                 db,
                 recipient_id,
-                f"Nuevo mensaje de {sender_name}",
-                preview,
-                {"type": "new_message", "walk_id": walk.id, "message_id": msg.id},
+                "Nuevo mensaje",
+                "Tienes un nuevo mensaje en WOFFY GO.",
+                {
+                    "type": "new_message",
+                    "walk_id": walk.id,
+                    "message_id": msg.id,
+                    "recipient_id": recipient_id,
+                },
             )
     except Exception as e:
-        print(f"[push] Error notificando mensaje: {e}")
+        print("[push] Error notificando mensaje.")
 
     return msg
 
@@ -133,31 +136,83 @@ def list_messages(
     )
 
 
-@router.post("/read", response_model=dict, status_code=status.HTTP_200_OK)
-def mark_messages_as_read(
+@router.get("/unread-count", response_model=dict[str, int])
+def count_unread_messages(
     walk_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> dict:
-    """
-    Marca como leidos todos los mensajes del paseo que NO son del usuario actual
-    y que todavia no tienen read_at. Se llama al abrir el chat y en cada poll.
-    Devuelve cuantos mensajes se marcaron.
-    """
+) -> dict[str, int]:
     walk = _get_walk_or_404(db, walk_id)
     _ensure_participant(walk, current_user)
 
-    now = datetime.now(timezone.utc)
+    if current_user.id not in (walk.owner_id, walk.provider_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No participas en esta conversacion",
+        )
 
-    updated = (
+    unread = (
         db.query(Message)
         .filter(
             Message.walk_id == walk.id,
             Message.sender_id != current_user.id,
             Message.read_at.is_(None),
         )
-        .update({Message.read_at: now}, synchronize_session=False)
+        .count()
     )
+
+    return {"unread_count": int(unread)}
+
+
+from fastapi import Body as ReadMessageBody
+
+
+@router.post("/read", response_model=dict, status_code=status.HTTP_200_OK)
+def mark_messages_as_read(
+    walk_id: int,
+    message_ids: list[int] = ReadMessageBody(
+        ...,
+        embed=True,
+        min_length=1,
+        max_length=500,
+    ),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Confirma exclusivamente los mensajes identificados por el receptor."""
+
+    walk = _get_walk_or_404(db, walk_id)
+    _ensure_participant(walk, current_user)
+
+    if current_user.id not in (walk.owner_id, walk.provider_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No participas en esta conversacion",
+        )
+
+    if any(message_id <= 0 for message_id in message_ids):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Identificadores de mensajes invalidos.",
+        )
+
+    selected_ids = sorted(set(message_ids))
+    now = datetime.now(timezone.utc)
+
+    updated = (
+        db.query(Message)
+        .filter(
+            Message.walk_id == walk.id,
+            Message.id.in_(selected_ids),
+            Message.sender_id != current_user.id,
+            Message.read_at.is_(None),
+        )
+        .update(
+            {Message.read_at: now},
+            synchronize_session=False,
+        )
+    )
+
     db.commit()
 
     return {"marked_read": int(updated)}
