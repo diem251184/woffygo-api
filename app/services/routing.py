@@ -4,12 +4,18 @@ from fastapi import HTTPException, status
 from app.core.config import settings
 
 
-def get_driving_route_metrics(
+def get_driving_route_details(
     origin_lat: float,
     origin_lon: float,
     dest_lat: float,
     dest_lon: float,
-) -> tuple[Decimal, Decimal | None]:
+    *,
+    include_geometry: bool = False,
+) -> tuple[
+    Decimal,
+    Decimal | None,
+    list[list[float]] | None,
+]:
     """
     Calcula distancia y duracion vial mediante Mapbox Directions.
     Si la API falla, NO inventa kilómetros ni usa línea recta: falla explícitamente.
@@ -28,6 +34,39 @@ def get_driving_route_metrics(
     )
 
     try:
+        if include_geometry:
+            from urllib.parse import (
+                urlsplit,
+                urlunsplit,
+                parse_qsl,
+                urlencode,
+            )
+
+            parts = urlsplit(url)
+
+            parameters = [
+                (key, value)
+                for key, value in parse_qsl(
+                    parts.query,
+                    keep_blank_values=True,
+                )
+                if key.lower() not in (
+                    "geometries",
+                    "overview",
+                )
+            ]
+
+            parameters.extend([
+                ("geometries", "geojson"),
+                ("overview", "full"),
+            ])
+
+            url = urlunsplit(
+                parts._replace(
+                    query=urlencode(parameters)
+                )
+            )
+
         resp = requests.get(url, timeout=6.0)
     except Exception:
         raise HTTPException(
@@ -103,7 +142,75 @@ def get_driving_route_metrics(
         except (ArithmeticError, ValueError, TypeError):
             duration_seconds = None
 
-    return km, duration_seconds
+    coordinates = None
+
+    if include_geometry:
+
+        geometry = routes[0].get("geometry")
+
+        if (
+            isinstance(geometry, dict)
+            and geometry.get("type") == "LineString"
+        ):
+
+            raw = geometry.get("coordinates")
+
+            if (
+                isinstance(raw, list)
+                and 2 <= len(raw) <= 50000
+            ):
+
+                parsed = []
+                valid = True
+
+                for point in raw:
+
+                    if (
+                        not isinstance(point, list)
+                        or len(point) != 2
+                        or type(point[0]) not in (int, float)
+                        or type(point[1]) not in (int, float)
+                    ):
+                        valid = False
+                        break
+
+                    lon, lat = point
+
+                    if (
+                        not -180 <= lon <= 180
+                        or not -90 <= lat <= 90
+                    ):
+                        valid = False
+                        break
+
+                    parsed.append([
+                        float(lon),
+                        float(lat),
+                    ])
+
+                if valid:
+                    coordinates = parsed
+
+    return km, duration_seconds, coordinates
+
+
+def get_driving_route_metrics(
+    origin_lat: float,
+    origin_lon: float,
+    dest_lat: float,
+    dest_lon: float,
+) -> tuple[Decimal, Decimal | None]:
+    """Conserva el contrato original de distancia y duracion."""
+
+    km, duration, _ = get_driving_route_details(
+        origin_lat,
+        origin_lon,
+        dest_lat,
+        dest_lon,
+        include_geometry=False,
+    )
+
+    return km, duration
 
 
 def get_driving_distance_km(

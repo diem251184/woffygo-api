@@ -40,7 +40,7 @@ from app.services.bookings import (
 )
 from app.services.routing import (
     get_driving_distance_km,
-    get_driving_route_metrics,
+    get_driving_route_details,
 )
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
@@ -430,6 +430,8 @@ class TransportEtaRequest(BaseModel):
 class TransportEtaResponse(BaseModel):
     pickup_eta_seconds: float | None = None
     transport_eta_seconds: float | None = None
+    pickup_route_coordinates: list[list[float]] | None = None
+    transport_route_coordinates: list[list[float]] | None = None
     calculated_at: datetime
 
 
@@ -447,31 +449,37 @@ def _valid_eta_coordinates(
     )
 
 
-def _transport_eta_seconds(
+def _transport_eta_details(
     origin_lat: float,
     origin_lon: float,
     dest_lat: float,
     dest_lon: float,
-) -> float | None:
+    *,
+    include_geometry: bool = False,
+) -> tuple[
+    float | None,
+    list[list[float]] | None,
+]:
     try:
-        _, duration = get_driving_route_metrics(
+        _, duration, coordinates = get_driving_route_details(
             origin_lat,
             origin_lon,
             dest_lat,
             dest_lon,
+            include_geometry=include_geometry,
         )
     except HTTPException:
-        return None
+        return None, None
 
     if duration is None:
-        return None
+        return None, coordinates
 
     seconds = float(duration)
 
     if not math.isfinite(seconds) or seconds < 0:
-        return None
+        return None, coordinates
 
-    return seconds
+    return seconds, coordinates
 
 
 
@@ -603,20 +611,88 @@ def get_transport_eta(
     # No utilizar las coordenadas del telefono para
     # autorizar una reserva.
 
-    bookings = _eligible_available_bookings(
-        ServiceType.TRANSPORT,
-        current_user,
-        db,
-        booking_id=booking_id,
+    assigned_booking = (
+        db.query(Booking)
+        .filter(
+            Booking.id == booking_id,
+            Booking.provider_id == current_user.id,
+            Booking.service_type == ServiceType.TRANSPORT,
+            Booking.status.in_(
+                (
+                    BookingStatus.ACCEPTED,
+                    BookingStatus.IN_PROGRESS,
+                )
+            ),
+        )
+        .first()
     )
 
-    if len(bookings) != 1:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Traslado no disponible.",
+    if assigned_booking is not None:
+
+        from app.services.profile_service_access import (
+            ensure_profile_services_enabled,
         )
 
-    booking = bookings[0]
+        ensure_profile_services_enabled(current_user)
+
+        if current_user.service_type != "transport":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso al traslado no autorizado.",
+            )
+
+        profile = (
+            db.query(WalkerProfile)
+            .filter(
+                WalkerProfile.user_id == current_user.id
+            )
+            .first()
+        )
+
+        verification = (
+            db.query(WalkerVerification)
+            .filter(
+                WalkerVerification.user_id == current_user.id
+            )
+            .order_by(WalkerVerification.id.desc())
+            .first()
+        )
+
+        if (
+            profile is None
+            or not is_kyc_operationally_approved(
+                verification,
+                current_user.service_type,
+            )
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Tu cuenta no esta habilitada para el traslado.",
+            )
+
+        booking = assigned_booking
+
+    else:
+
+        # Conservar las reglas originales del Radar
+        # para solicitudes todavia no asignadas.
+
+        bookings = _eligible_available_bookings(
+            ServiceType.TRANSPORT,
+            current_user,
+            db,
+            booking_id=booking_id,
+        )
+
+        if len(bookings) != 1:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Traslado no disponible.",
+            )
+
+        booking = bookings[0]
+
+    is_assigned = assigned_booking is not None
 
     # Leer las coordenadas oficiales de la reserva.
     # No aceptar destinos arbitrarios desde Android.
@@ -635,15 +711,32 @@ def get_transport_eta(
                     AS dropoff_lon
             FROM bookings
             WHERE id = :booking_id
-              AND provider_id IS NULL
-              AND status = :requested_status
               AND service_type = :transport_type
+              AND (
+                  (
+                      :assigned = false
+                      AND provider_id IS NULL
+                      AND status = :requested_status
+                  )
+                  OR
+                  (
+                      :assigned = true
+                      AND provider_id = :provider_id
+                      AND status = :assigned_status
+                  )
+              )
             """
         ),
         {
             "booking_id": booking.id,
             "requested_status": BookingStatus.REQUESTED.name,
             "transport_type": ServiceType.TRANSPORT.name,
+            "assigned": is_assigned,
+            "provider_id": current_user.id,
+            "assigned_status": (
+                booking.status.name if is_assigned
+                else BookingStatus.REQUESTED.name
+            ),
         },
     ).first()
 
@@ -672,31 +765,66 @@ def get_transport_eta(
 
     pickup_eta = None
     transport_eta = None
+    pickup_route_coordinates = None
+    transport_route_coordinates = None
 
-    if _valid_eta_coordinates(pickup_lat, pickup_lon):
+    if booking.status == BookingStatus.IN_PROGRESS:
+
+        # Durante el traslado, calcular el tiempo restante
+        # desde la ubicacion actual hasta el destino.
+        # No calcular nuevamente una llegada al retiro.
+
+        if _valid_eta_coordinates(
+            dropoff_lat, dropoff_lon
+        ):
+
+            _admit_transport_eta(db, current_user.id)
+
+            transport_eta, transport_route_coordinates = (
+                _transport_eta_details(
+                    payload.latitude,
+                    payload.longitude,
+                    dropoff_lat,
+                    dropoff_lon,
+                    include_geometry=True,
+                )
+            )
+
+    elif _valid_eta_coordinates(pickup_lat, pickup_lon):
+
+        # Radar y servicios aceptados:
+        # posicion actual -> retiro -> destino.
 
         _admit_transport_eta(db, current_user.id)
 
-        pickup_eta = _transport_eta_seconds(
-            payload.latitude,
-            payload.longitude,
-            pickup_lat,
-            pickup_lon,
+        pickup_eta, pickup_route_coordinates = (
+            _transport_eta_details(
+                payload.latitude,
+                payload.longitude,
+                pickup_lat,
+                pickup_lon,
+                include_geometry=is_assigned,
+            )
         )
 
         if _valid_eta_coordinates(
             dropoff_lat, dropoff_lon
         ):
-            transport_eta = _transport_eta_seconds(
-                pickup_lat,
-                pickup_lon,
-                dropoff_lat,
-                dropoff_lon,
+            transport_eta, transport_route_coordinates = (
+                _transport_eta_details(
+                    pickup_lat,
+                    pickup_lon,
+                    dropoff_lat,
+                    dropoff_lon,
+                    include_geometry=is_assigned,
+                )
             )
 
     return TransportEtaResponse(
         pickup_eta_seconds=pickup_eta,
         transport_eta_seconds=transport_eta,
+        pickup_route_coordinates=pickup_route_coordinates,
+        transport_route_coordinates=transport_route_coordinates,
         calculated_at=datetime.now(timezone.utc),
     )
 
