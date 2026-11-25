@@ -1,9 +1,14 @@
 from decimal import Decimal
+from datetime import datetime, timezone
+import math
+from pydantic import BaseModel, Field
 import json
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from geoalchemy2.elements import WKTElement
 from geoalchemy2.functions import ST_X, ST_Y
 from sqlalchemy import func, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
@@ -33,7 +38,10 @@ from app.services.bookings import (
     get_booking_or_404,
     start_booking,
 )
-from app.services.routing import get_driving_distance_km
+from app.services.routing import (
+    get_driving_distance_km,
+    get_driving_route_metrics,
+)
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 
@@ -160,12 +168,12 @@ def list_mine(
     return bookings
 
 
-@router.get("/available", response_model=list[BookingResponse], response_model_exclude={"__all__": {"platform_fee", "price_total"}})
-def list_available(
-    service_type: ServiceType = Query(default=ServiceType.WALK),
-    current_user: User = Depends(require_role(UserRole.WALKER)),
-    db: Session = Depends(get_db),
-):
+def _eligible_available_bookings(
+    service_type: ServiceType,
+    current_user: User,
+    db: Session,
+    booking_id: int | None = None,
+) -> list[Booking]:
     from app.services.profile_service_access import ensure_profile_services_enabled
     from app.services.bookings import is_booking_pet_snapshot_compatible
     ensure_profile_services_enabled(current_user)
@@ -222,6 +230,11 @@ def list_available(
         .filter(Booking.status == BookingStatus.REQUESTED)
         .filter(Booking.provider_id.is_(None))
         .filter(Booking.service_type == service_type)
+        .filter(
+            Booking.id == booking_id
+            if booking_id is not None
+            else True
+        )
         .filter(
             text(
                 """
@@ -286,6 +299,19 @@ def list_available(
             compatible_bookings.append(booking)
     bookings = compatible_bookings
 
+    return bookings
+
+
+@router.get("/available", response_model=list[BookingResponse], response_model_exclude={"__all__": {"platform_fee", "price_total"}})
+def list_available(
+    service_type: ServiceType = Query(default=ServiceType.WALK),
+    current_user: User = Depends(require_role(UserRole.WALKER)),
+    db: Session = Depends(get_db),
+):
+    bookings = _eligible_available_bookings(
+        service_type, current_user, db
+    )
+
     from app.services.bookings import get_platform_fee_rate
     from decimal import Decimal
     fee_rate = get_platform_fee_rate()
@@ -295,6 +321,291 @@ def list_available(
         fee = (b.price_total * fee_rate).quantize(Decimal("0.01"))
         b.provider_earnings = b.price_total - fee
     return bookings
+
+
+
+
+class TransportEtaRequest(BaseModel):
+    latitude: float = Field(
+        ..., ge=-90, le=90, allow_inf_nan=False
+    )
+    longitude: float = Field(
+        ..., ge=-180, le=180, allow_inf_nan=False
+    )
+
+
+class TransportEtaResponse(BaseModel):
+    pickup_eta_seconds: float | None = None
+    transport_eta_seconds: float | None = None
+    calculated_at: datetime
+
+
+def _valid_eta_coordinates(
+    latitude: float | None,
+    longitude: float | None,
+) -> bool:
+    return (
+        latitude is not None
+        and longitude is not None
+        and math.isfinite(latitude)
+        and math.isfinite(longitude)
+        and -90 <= latitude <= 90
+        and -180 <= longitude <= 180
+    )
+
+
+def _transport_eta_seconds(
+    origin_lat: float,
+    origin_lon: float,
+    dest_lat: float,
+    dest_lon: float,
+) -> float | None:
+    try:
+        _, duration = get_driving_route_metrics(
+            origin_lat,
+            origin_lon,
+            dest_lat,
+            dest_lon,
+        )
+    except HTTPException:
+        return None
+
+    if duration is None:
+        return None
+
+    seconds = float(duration)
+
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+
+    return seconds
+
+
+
+
+TRANSPORT_ETA_COOLDOWN_SECONDS = 15
+
+
+def _admit_transport_eta(
+    db: Session,
+    user_id: int,
+) -> None:
+    """Control de concurrencia y frecuencia compartido en PostgreSQL."""
+
+    try:
+        # El bloqueo permanece durante la transaccion
+        # de la solicitud actual y se libera al cerrarla.
+        acquired = db.execute(
+            text(
+                """
+                SELECT pg_try_advisory_xact_lock(
+                    hashtextextended(:lock_key, 0)
+                )
+                """
+            ),
+            {
+                "lock_key":
+                    f"woffygo:transport-eta:v1:{user_id}"
+            },
+        ).scalar_one()
+
+        if not acquired:
+            raise HTTPException(
+                status_code=429,
+                detail="Ya hay una consulta ETA en curso.",
+                headers={
+                    "Retry-After": str(
+                        TRANSPORT_ETA_COOLDOWN_SECONDS
+                    )
+                },
+            )
+
+        bind = db.get_bind()
+
+        if not isinstance(bind, Engine):
+            raise HTTPException(
+                status_code=503,
+                detail="Estimacion temporalmente no disponible.",
+            )
+
+        # Transaccion independiente para conservar el limite
+        # aun cuando Mapbox falle posteriormente.
+        # No confirmar cambios de la sesion de la reserva.
+
+        with bind.begin() as quota_db:
+
+            quota_db.execute(
+                text("SET LOCAL lock_timeout = '2s'")
+            )
+
+            quota_db.execute(
+                text("SET LOCAL statement_timeout = '3s'")
+            )
+
+            admitted = quota_db.execute(
+                text(
+                    """
+                    INSERT INTO transport_eta_rate_limits (
+                        user_id,
+                        next_allowed_at
+                    )
+                    VALUES (
+                        :user_id,
+                        clock_timestamp()
+                        + make_interval(secs => :cooldown)
+                    )
+                    ON CONFLICT (user_id)
+                    DO UPDATE SET
+                        next_allowed_at =
+                            clock_timestamp()
+                            + make_interval(secs => :cooldown)
+                    WHERE
+                        transport_eta_rate_limits.next_allowed_at
+                        <= clock_timestamp()
+                    RETURNING user_id
+                    """
+                ),
+                {
+                    "user_id": user_id,
+                    "cooldown": float(
+                        TRANSPORT_ETA_COOLDOWN_SECONDS
+                    ),
+                },
+            ).scalar_one_or_none()
+
+        if admitted is None:
+            raise HTTPException(
+                status_code=429,
+                detail="Espera unos segundos antes de consultar nuevamente.",
+                headers={
+                    "Retry-After": str(
+                        TRANSPORT_ETA_COOLDOWN_SECONDS
+                    )
+                },
+            )
+
+    except SQLAlchemyError:
+        # Fallar de forma cerrada: si no se puede acreditar
+        # el limite, no se autoriza consumo de Mapbox.
+
+        raise HTTPException(
+            status_code=503,
+            detail="Estimacion temporalmente no disponible.",
+        ) from None
+
+
+@router.post(
+    "/{booking_id}/transport-eta",
+    response_model=TransportEtaResponse,
+)
+def get_transport_eta(
+    booking_id: int,
+    payload: TransportEtaRequest,
+    current_user: User = Depends(
+        require_role(UserRole.WALKER)
+    ),
+    db: Session = Depends(get_db),
+):
+    # Aplicar exactamente las reglas de acceso del Radar.
+    # No utilizar las coordenadas del telefono para
+    # autorizar una reserva.
+
+    bookings = _eligible_available_bookings(
+        ServiceType.TRANSPORT,
+        current_user,
+        db,
+        booking_id=booking_id,
+    )
+
+    if len(bookings) != 1:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Traslado no disponible.",
+        )
+
+    booking = bookings[0]
+
+    # Leer las coordenadas oficiales de la reserva.
+    # No aceptar destinos arbitrarios desde Android.
+
+    route = db.execute(
+        text(
+            """
+            SELECT
+                ST_Y(CAST(pickup_location AS geometry))
+                    AS pickup_lat,
+                ST_X(CAST(pickup_location AS geometry))
+                    AS pickup_lon,
+                ST_Y(CAST(dropoff_location AS geometry))
+                    AS dropoff_lat,
+                ST_X(CAST(dropoff_location AS geometry))
+                    AS dropoff_lon
+            FROM bookings
+            WHERE id = :booking_id
+              AND provider_id IS NULL
+              AND status = :requested_status
+              AND service_type = :transport_type
+            """
+        ),
+        {
+            "booking_id": booking.id,
+            "requested_status": BookingStatus.REQUESTED.name,
+            "transport_type": ServiceType.TRANSPORT.name,
+        },
+    ).first()
+
+    if route is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Traslado no disponible.",
+        )
+
+    pickup_lat = (
+        float(route.pickup_lat)
+        if route.pickup_lat is not None else None
+    )
+    pickup_lon = (
+        float(route.pickup_lon)
+        if route.pickup_lon is not None else None
+    )
+    dropoff_lat = (
+        float(route.dropoff_lat)
+        if route.dropoff_lat is not None else None
+    )
+    dropoff_lon = (
+        float(route.dropoff_lon)
+        if route.dropoff_lon is not None else None
+    )
+
+    pickup_eta = None
+    transport_eta = None
+
+    if _valid_eta_coordinates(pickup_lat, pickup_lon):
+
+        _admit_transport_eta(db, current_user.id)
+
+        pickup_eta = _transport_eta_seconds(
+            payload.latitude,
+            payload.longitude,
+            pickup_lat,
+            pickup_lon,
+        )
+
+        if _valid_eta_coordinates(
+            dropoff_lat, dropoff_lon
+        ):
+            transport_eta = _transport_eta_seconds(
+                pickup_lat,
+                pickup_lon,
+                dropoff_lat,
+                dropoff_lon,
+            )
+
+    return TransportEtaResponse(
+        pickup_eta_seconds=pickup_eta,
+        transport_eta_seconds=transport_eta,
+        calculated_at=datetime.now(timezone.utc),
+    )
 
 
 @router.get("/{booking_id}", response_model=BookingResponse)
