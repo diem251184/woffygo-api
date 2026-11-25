@@ -16,7 +16,10 @@ from app.schemas.booking import BookingCreate
 from app.services import push
 from app.services.escrow import start_escrow_window
 from app.services.pricing import walk_price, transport_price
-from app.services.routing import get_driving_distance_km
+from app.services.routing import (
+    get_driving_distance_km,
+    get_driving_route_metrics,
+)
 
 ALLOWED_TRANSITIONS: dict[BookingStatus, set[BookingStatus]] = {
     BookingStatus.REQUESTED: {BookingStatus.ACCEPTED, BookingStatus.REJECTED, BookingStatus.CANCELLED},
@@ -90,6 +93,7 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
     from app.services.profile_service_access import ensure_profile_services_enabled
     ensure_profile_services_enabled(owner)
     scheduled_pickup = payload.scheduled_pickup_at
+    estimated_transport_seconds = None
 
     if payload.service_type == ServiceType.TRANSPORT:
         if scheduled_pickup is None:
@@ -202,11 +206,34 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
                 detail="Woofy Traslados requiere una direccion de destino valida de hasta 255 caracteres",
             )
 
-        dist_km = get_driving_distance_km(
+        dist_km, route_duration = get_driving_route_metrics(
             payload.pickup_latitude,
             payload.pickup_longitude,
             payload.dropoff_latitude,
             payload.dropoff_longitude,
+        )
+
+        if (
+            route_duration is None
+            or not route_duration.is_finite()
+            or route_duration < 0
+            or route_duration > Decimal("2147483647")
+            or (dist_km > 0 and route_duration == 0)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "No se pudo acreditar la duracion vial del traslado. "
+                    "Intenta nuevamente."
+                ),
+            )
+
+        from decimal import ROUND_CEILING
+
+        estimated_transport_seconds = int(
+            route_duration.to_integral_value(
+                rounding=ROUND_CEILING
+            )
         )
         distance_meters = (dist_km * Decimal("1000")).quantize(Decimal("0.01"))
         price_total = transport_price(dist_km, num_pets)
@@ -257,6 +284,7 @@ def create_booking(db: Session, owner: User, payload: BookingCreate) -> Booking:
         ),
         dropoff_address=destination_address,
         duration_minutes=payload.duration_minutes,
+        estimated_transport_seconds=estimated_transport_seconds,
         notes=booking_notes,
         price_total=price_total,
         platform_fee=Decimal("0.00"),
@@ -353,6 +381,280 @@ def is_booking_pet_snapshot_compatible(
 
     return True
 
+# Margenes operativos iniciales de planificacion.
+# No representan una duracion vial medida.
+# Mantener los mismos valores para todos los consumidores.
+TRANSPORT_PICKUP_HANDLING_SECONDS = 600
+TRANSPORT_DELIVERY_HANDLING_SECONDS = 600
+
+
+def transport_schedule_conflict(
+    db: Session,
+    provider_id: int,
+    booking: Booking,
+    *,
+    verify_road_transfer: bool = True,
+    actual_start_at: datetime | None = None,
+):
+    """Read-only schedule evaluation.
+
+    Acceptance must hold the provider row lock before
+    calling this function. Advisory consumers do not
+    reserve capacity and must not authorize acceptance.
+    """
+
+    from app.services.transport_schedule import (
+        ScheduleConflict,
+        TransportWindow,
+        evaluate_transport_candidate,
+        evaluate_transport_pair,
+        transport_window_bounds,
+    )
+
+    from app.services.transport_schedule_routes import (
+        RoadPoint,
+        ScheduledTransport,
+        evaluate_road_compatibility,
+        valid_road_point,
+    )
+
+    from geoalchemy2.shape import to_shape
+
+    def as_scheduled(item, pickup_override=None):
+
+        if item.service_type != ServiceType.TRANSPORT:
+            return None
+
+        window = TransportWindow(
+            pickup_at=(
+                item.scheduled_pickup_at
+                if pickup_override is None
+                else pickup_override
+            ),
+            road_seconds=item.estimated_transport_seconds,
+            pickup_handling_seconds=(
+                TRANSPORT_PICKUP_HANDLING_SECONDS
+                + (30 if pickup_override is not None else 0)
+            ),
+            delivery_handling_seconds=(
+                TRANSPORT_DELIVERY_HANDLING_SECONDS
+            ),
+        )
+
+        if transport_window_bounds(window) is None:
+            return None
+
+        try:
+
+            pickup_shape = to_shape(item.pickup_location)
+            dropoff_shape = to_shape(item.dropoff_location)
+
+            pickup = RoadPoint(
+                latitude=float(pickup_shape.y),
+                longitude=float(pickup_shape.x),
+            )
+
+            dropoff = RoadPoint(
+                latitude=float(dropoff_shape.y),
+                longitude=float(dropoff_shape.x),
+            )
+
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+            ArithmeticError,
+        ):
+            return None
+
+        if (
+            not valid_road_point(pickup)
+            or not valid_road_point(dropoff)
+        ):
+            return None
+
+        return ScheduledTransport(
+            window=window,
+            pickup=pickup,
+            dropoff=dropoff,
+        )
+
+    if type(verify_road_transfer) is not bool:
+        return ScheduleConflict.INVALID_DATA
+
+    if actual_start_at is not None:
+
+        # Only a definitively assigned transport may
+        # be evaluated for actual commencement.
+        if (
+            not verify_road_transfer
+            or booking.status != BookingStatus.ACCEPTED
+            or booking.provider_id != provider_id
+            or not isinstance(actual_start_at, datetime)
+            or actual_start_at.utcoffset() is None
+            or booking.scheduled_pickup_at is None
+            or booking.scheduled_pickup_at.utcoffset() is None
+            or actual_start_at < booking.scheduled_pickup_at
+        ):
+            return ScheduleConflict.INVALID_DATA
+
+    candidate = as_scheduled(
+        booking,
+        pickup_override=actual_start_at,
+    )
+
+    if candidate is None:
+        return ScheduleConflict.INVALID_DATA
+
+    current = _now()
+
+    active = (
+        db.query(Booking)
+        .filter(
+            Booking.provider_id == provider_id,
+            Booking.id != booking.id,
+            Booking.status.in_(
+                (
+                    BookingStatus.ACCEPTED,
+                    BookingStatus.IN_PROGRESS,
+                )
+            ),
+        )
+        .populate_existing()
+        .all()
+    )
+
+    has_service_in_progress = any(
+        item.status == BookingStatus.IN_PROGRESS
+        for item in active
+    )
+
+    if actual_start_at is None:
+
+        result = evaluate_transport_candidate(
+            candidate.window,
+            now=current,
+            has_service_in_progress=has_service_in_progress,
+        )
+
+        if result != ScheduleConflict.NONE:
+            return result
+
+    else:
+
+        # A real start is not a future pickup request.
+        # Its time is generated exclusively by the server.
+        if has_service_in_progress:
+            return ScheduleConflict.ACTIVE_SERVICE
+
+        if actual_start_at > current:
+            return ScheduleConflict.INVALID_DATA
+
+    existing = []
+
+    for item in active:
+
+        scheduled = as_scheduled(item)
+
+        # Unknown historical duration or coordinates
+        # cannot be treated as a free interval.
+        if scheduled is None:
+            return ScheduleConflict.INVALID_DATA
+
+        bounds = transport_window_bounds(
+            scheduled.window
+        )
+
+        # An overdue accepted service remains unresolved.
+        if bounds is None or bounds[0] <= current:
+            return ScheduleConflict.ACTIVE_SERVICE
+
+        preliminary = evaluate_transport_pair(
+            candidate.window,
+            scheduled.window,
+            transfer_seconds=0,
+        )
+
+        if preliminary != ScheduleConflict.NONE:
+            return preliminary
+
+        existing.append(scheduled)
+
+    # Advisory consumers filter known scheduling conflicts
+    # without generating external route requests.
+    # This is not authorization to accept a booking.
+    if not verify_road_transfer:
+        return ScheduleConflict.NONE
+
+    candidate_start = transport_window_bounds(
+        candidate.window
+    )[0]
+
+    previous = None
+    following = None
+
+    for scheduled in existing:
+
+        start = transport_window_bounds(
+            scheduled.window
+        )[0]
+
+        if start < candidate_start:
+
+            if (
+                previous is None
+                or start > transport_window_bounds(
+                    previous.window
+                )[0]
+            ):
+                previous = scheduled
+
+        else:
+
+            if (
+                following is None
+                or start < transport_window_bounds(
+                    following.window
+                )[0]
+            ):
+                following = scheduled
+
+    # Only adjacent appointments require new
+    # inter-service routes when inserting a booking.
+    if previous is not None:
+
+        result = evaluate_road_compatibility(
+            previous,
+            candidate,
+        )
+
+        if result != ScheduleConflict.NONE:
+            return result
+
+    if following is not None:
+
+        result = evaluate_road_compatibility(
+            candidate,
+            following,
+        )
+
+        if result != ScheduleConflict.NONE:
+            return result
+
+    # Recheck expiration after external route calls.
+    if actual_start_at is None:
+
+        return evaluate_transport_candidate(
+            candidate.window,
+            now=_now(),
+            has_service_in_progress=False,
+        )
+
+    # The definitive start path performs its final
+    # evaluation again if time advanced materially.
+    return ScheduleConflict.NONE
+
+
 def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
     from app.services.profile_service_access import ensure_profile_services_enabled
     ensure_profile_services_enabled(provider)
@@ -404,6 +706,7 @@ def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
         db.query(User)
         .filter(User.id == provider.id)
         .with_for_update()
+        .populate_existing()
         .first()
     )
     if locked_provider is None:
@@ -412,16 +715,22 @@ def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
             detail="El prestador no esta disponible.",
         )
 
-    # 4. Validar que el paseador no tenga ya un servicio en curso
-    active_booking = db.query(Booking).filter(
-        Booking.provider_id == provider.id,
-        Booking.status.in_([BookingStatus.ACCEPTED, BookingStatus.IN_PROGRESS]),
-    ).first()
-    if active_booking:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Ya tienes un servicio activo. Debes finalizarlo antes de tomar otro.",
-        )
+    # Preserve the original single-service policy
+    # for walks. Transport uses the scheduling engine.
+    if booking.service_type != ServiceType.TRANSPORT:
+        active_booking = db.query(Booking).filter(
+            Booking.provider_id == provider.id,
+            Booking.status.in_([
+                BookingStatus.ACCEPTED,
+                BookingStatus.IN_PROGRESS,
+            ]),
+        ).first()
+
+        if active_booking:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Ya tienes un servicio activo. Debes finalizarlo antes de tomar otro.",
+            )
 
     # Compatibilidad obligatoria entre servicio y prestador.
     expected_provider_type = (
@@ -434,6 +743,14 @@ def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="El prestador no esta habilitado para este tipo de servicio.",
         )
+
+    if locked_provider.role != UserRole.WALKER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo un prestador puede aceptar solicitudes.",
+        )
+
+    provider = locked_provider
 
     if not booking.booking_pets:
         raise HTTPException(
@@ -538,6 +855,43 @@ def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
     fee = (price_total * fee_rate).quantize(Decimal("0.01"))
     earnings = price_total - fee
 
+    if booking.service_type == ServiceType.TRANSPORT:
+
+        from app.services.transport_schedule import (
+            ScheduleConflict,
+        )
+
+        conflict = transport_schedule_conflict(
+            db,
+            provider.id,
+            booking,
+        )
+
+        if conflict != ScheduleConflict.NONE:
+
+            messages = {
+                ScheduleConflict.INVALID_DATA:
+                    "No se pudo acreditar la duracion o el horario de tu agenda.",
+                ScheduleConflict.EXPIRED_PICKUP:
+                    "El horario de retiro de esta solicitud ya paso.",
+                ScheduleConflict.OVERLAPPING:
+                    "Este traslado se superpone con otro servicio reservado.",
+                ScheduleConflict.TRANSFER_UNKNOWN:
+                    "No se pudo calcular el desplazamiento entre servicios.",
+                ScheduleConflict.INSUFFICIENT_TRANSFER:
+                    "No hay tiempo suficiente para llegar al siguiente retiro.",
+                ScheduleConflict.ACTIVE_SERVICE:
+                    "Tenes un servicio en curso o una reserva vencida sin resolver.",
+            }
+
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=messages.get(
+                    conflict,
+                    "No se pudo verificar la compatibilidad horaria.",
+                ),
+            )
+
     booking.provider_id = provider.id
     booking.status = BookingStatus.ACCEPTED
     booking.accepted_at = _now()
@@ -562,13 +916,93 @@ def accept_booking(db: Session, provider: User, booking_id: int) -> Booking:
 
 
 def start_booking(db: Session, provider: User, booking_id: int) -> Booking:
-    booking = get_booking_or_404(db, booking_id)
+    if provider.role != UserRole.WALKER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo el prestador puede iniciar el servicio.",
+        )
+
+    # Mismo orden de bloqueos que accept_booking:
+    # primero reserva y luego prestador.
+    booking = (
+        db.query(Booking)
+        .filter(Booking.id == booking_id)
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+
+    if booking is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Reserva no encontrada",
+        )
+
     if booking.provider_id != provider.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No estás asignado a esta reserva",
         )
-    validate_status_transition(booking.status, BookingStatus.IN_PROGRESS)
+    locked_provider = (
+        db.query(User)
+        .filter(User.id == provider.id)
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+
+    if (
+        locked_provider is None
+        or locked_provider.role != UserRole.WALKER
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="El prestador no esta disponible.",
+        )
+
+    provider = locked_provider
+
+    validate_status_transition(
+        booking.status,
+        BookingStatus.IN_PROGRESS,
+    )
+
+    # La fila del prestador permanece bloqueada hasta
+    # finalizar la transaccion. Dos inicios del mismo
+    # prestador no pueden superar este control a la vez.
+    other_in_progress = (
+        db.query(Booking.id)
+        .filter(
+            Booking.provider_id == provider.id,
+            Booking.id != booking.id,
+            Booking.status == BookingStatus.IN_PROGRESS,
+        )
+        .first()
+    )
+
+    if other_in_progress is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Ya tenes un servicio en curso. "
+                "Debes finalizarlo antes de iniciar otro."
+            ),
+        )
+
+    expected_provider_type = (
+        "walk" if booking.service_type == ServiceType.WALK
+        else "transport" if booking.service_type == ServiceType.TRANSPORT
+        else None
+    )
+
+    if (
+        expected_provider_type is None
+        or provider.service_type != expected_provider_type
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No estas habilitado para este tipo de servicio.",
+        )
 
     # Revalidar habilitacion y KYC en el momento real de inicio.
     # La aprobacion al aceptar no sustituye este control.
@@ -611,6 +1045,60 @@ def start_booking(db: Session, provider: User, booking_id: int) -> Booking:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Todavia no llego el horario programado de retiro.",
             )
+
+    if booking.service_type == ServiceType.TRANSPORT:
+
+        from datetime import timedelta
+
+        from app.services.transport_schedule import (
+            ScheduleConflict,
+        )
+
+        # Keep a short planning allowance for the time
+        # spent checking the road routes.
+        # This is not added to the persisted start time.
+        validation_allowance = timedelta(seconds=30)
+
+        # The actual-start evaluation must use a time
+        # obtained from the server, not the client.
+        started_now = _now()
+
+        conflict = transport_schedule_conflict(
+            db,
+            provider.id,
+            booking,
+            actual_start_at=started_now,
+        )
+
+        if conflict != ScheduleConflict.NONE:
+
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "No se pudo confirmar que este traslado "
+                    "sea compatible con tu agenda actual. "
+                    "Revisa tus servicios reservados."
+                ),
+            )
+
+        checked_at = _now()
+
+        # Avoid using a stale schedule evaluation.
+        if (
+            checked_at < started_now
+            or checked_at - started_now > validation_allowance
+        ):
+
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "La comprobacion de agenda demoro demasiado. "
+                    "Intenta iniciar nuevamente."
+                ),
+            )
+
+        # Persist the time used by the schedule check.
+        # All existing start prerequisites remain intact.
 
     booking.status = BookingStatus.IN_PROGRESS
     booking.started_at = started_now
@@ -695,7 +1183,13 @@ def notify_nearby_providers_new_booking(db: Session, booking: Booking, pets: lis
               SELECT 1
               FROM bookings active_b
               WHERE active_b.provider_id = wp.user_id
-                AND active_b.status IN (:accepted_status, :in_progress_status)
+                AND (
+                    active_b.status = :in_progress_status
+                    OR (
+                        :is_transport = false
+                        AND active_b.status = :accepted_status
+                    )
+                )
           )
           AND (:has_cats = false OR wp.accepts_cats = true)
           AND (:has_ppp = false OR wp.accepts_ppp = true)
@@ -756,12 +1250,21 @@ def notify_nearby_providers_new_booking(db: Session, booking: Booking, pets: lis
         verifications = (
             db.query(WalkerVerification)
             .filter(WalkerVerification.user_id.in_(candidate_ids))
+            .order_by(
+                WalkerVerification.user_id.asc(),
+                WalkerVerification.id.desc(),
+            )
             .all()
         )
-        verification_by_user = {
-            verification.user_id: verification
-            for verification in verifications
-        }
+        verification_by_user = {}
+
+        for verification in verifications:
+
+            # Rows are ordered newest first for each user.
+            verification_by_user.setdefault(
+                verification.user_id,
+                verification,
+            )
         required_service = "transport" if is_transport else "walk"
 
         user_ids = [
@@ -771,6 +1274,26 @@ def notify_nearby_providers_new_booking(db: Session, booking: Booking, pets: lis
                 verification_by_user.get(user_id),
                 required_service,
             )
+        ]
+
+    if is_transport and user_ids:
+
+        from app.services.transport_schedule import (
+            ScheduleConflict,
+        )
+
+        # Use the same advisory schedule criteria as Radar
+        # and booking detail. No external routing requests.
+        # Acceptance still requires the definitive checks.
+        user_ids = [
+            user_id
+            for user_id in user_ids
+            if transport_schedule_conflict(
+                db,
+                user_id,
+                booking,
+                verify_road_transfer=False,
+            ) == ScheduleConflict.NONE
         ]
 
     if user_ids:

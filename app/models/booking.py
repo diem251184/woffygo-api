@@ -73,6 +73,13 @@ class Booking(Base):
     )
     duration_minutes: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
 
+    # Duracion vial estimada por el servidor.
+    # NULL identifica reservas sin estimacion acreditada.
+    estimated_transport_seconds: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
     price_total: Mapped[Decimal] = mapped_column(
         Numeric(10, 2), default=Decimal("0.00"), nullable=False
     )

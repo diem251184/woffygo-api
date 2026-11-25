@@ -303,19 +303,23 @@ def _eligible_available_bookings(
 
     # No mostrar nuevas solicitudes mientras el prestador
     # mantiene un servicio aceptado o en curso.
-    occupied = (
-        db.query(Booking.id)
-        .filter(
-            Booking.provider_id == current_user.id,
-            Booking.status.in_(
-                (BookingStatus.ACCEPTED, BookingStatus.IN_PROGRESS)
-            ),
+    # Preserve the original single-service policy for walks.
+    if service_type != ServiceType.TRANSPORT:
+
+        occupied = (
+            db.query(Booking.id)
+            .filter(
+                Booking.provider_id == current_user.id,
+                Booking.status.in_(
+                    (BookingStatus.ACCEPTED, BookingStatus.IN_PROGRESS)
+                ),
+            )
+            .first()
+            is not None
         )
-        .first()
-        is not None
-    )
-    if occupied:
-        return []
+
+        if occupied:
+            return []
 
     bookings = (
         db.query(Booking)
@@ -391,6 +395,27 @@ def _eligible_available_bookings(
         if compatible:
             compatible_bookings.append(booking)
     bookings = compatible_bookings
+
+    if service_type == ServiceType.TRANSPORT:
+
+        from app.services.bookings import (
+            transport_schedule_conflict,
+        )
+
+        from app.services.transport_schedule import (
+            ScheduleConflict,
+        )
+
+        bookings = [
+            booking
+            for booking in bookings
+            if transport_schedule_conflict(
+                db,
+                current_user.id,
+                booking,
+                verify_road_transfer=False,
+            ) == ScheduleConflict.NONE
+        ]
 
     return bookings
 
@@ -926,19 +951,42 @@ def get_one(
     # Un candidato ocupado no puede acceder a una solicitud
     # que tampoco estaria autorizado a aceptar.
     if is_eligible_candidate:
-        occupied = (
-            db.query(Booking.id)
-            .filter(
-                Booking.provider_id == current_user.id,
-                Booking.status.in_(
-                    (BookingStatus.ACCEPTED, BookingStatus.IN_PROGRESS)
-                ),
+
+        if booking.service_type == ServiceType.TRANSPORT:
+
+            from app.services.bookings import (
+                transport_schedule_conflict,
             )
-            .first()
-            is not None
-        )
-        if occupied:
-            is_eligible_candidate = False
+
+            from app.services.transport_schedule import (
+                ScheduleConflict,
+            )
+
+            is_eligible_candidate = (
+                transport_schedule_conflict(
+                    db,
+                    current_user.id,
+                    booking,
+                    verify_road_transfer=False,
+                ) == ScheduleConflict.NONE
+            )
+
+        else:
+
+            occupied = (
+                db.query(Booking.id)
+                .filter(
+                    Booking.provider_id == current_user.id,
+                    Booking.status.in_(
+                        (BookingStatus.ACCEPTED, BookingStatus.IN_PROGRESS)
+                    ),
+                )
+                .first()
+                is not None
+            )
+
+            if occupied:
+                is_eligible_candidate = False
 
     if not (is_owner or is_provider or is_admin or is_eligible_candidate):
         raise HTTPException(status_code=403, detail="Sin acceso a esta reserva")
