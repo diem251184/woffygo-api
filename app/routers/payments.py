@@ -48,6 +48,80 @@ def start_checkout(
     return create_checkout(db, booking, current_user)
 
 
+@router.get("/statuses", response_model=dict[str, str])
+def get_payment_statuses(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    """Estados financieros de las reservas propias, sin datos de pago."""
+    from sqlalchemy import or_
+
+    if current_user.role not in (
+        UserRole.OWNER,
+        UserRole.WALKER,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso no autorizado.",
+        )
+
+    rows = (
+        db.query(
+            Booking.id,
+            Payment.id,
+            Payment.status,
+        )
+        .outerjoin(
+            Payment,
+            Payment.booking_id == Booking.id,
+        )
+        .filter(
+            or_(
+                Booking.owner_id == current_user.id,
+                Booking.provider_id == current_user.id,
+            )
+        )
+        .order_by(Booking.id, Payment.id)
+        .all()
+    )
+
+    result: dict[str, str] = {}
+
+    allowed = {
+        "pendiente",
+        "aprobado",
+        "rechazado",
+        "reembolsado",
+        "cancelado",
+        "liberado",
+        "en_disputa",
+    }
+
+    for booking_id, payment_id, payment_status in rows:
+        key = str(booking_id)
+
+        # Si existen registros financieros multiples,
+        # no inferir que alguno autoriza el inicio.
+        if key in result:
+            result[key] = "sin_datos"
+            continue
+
+        if payment_id is None:
+            result[key] = "sin_pago"
+            continue
+
+        raw = getattr(payment_status, "value", payment_status)
+        normalized = str(raw).strip().lower()
+
+        result[key] = (
+            normalized
+            if normalized in allowed
+            else "sin_datos"
+        )
+
+    return result
+
+
 @router.get("/{booking_id}", response_model=PaymentResponse)
 def get_payment_by_booking(
     booking_id: int,
