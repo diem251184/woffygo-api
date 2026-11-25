@@ -54,6 +54,14 @@ class WalkerVerificationOut(BaseModel):
 
 class WalkerVerificationStatusOut(BaseModel):
     has_verification: bool
+    has_dni_front: bool = False
+    has_dni_back: bool = False
+    has_selfie: bool = False
+    has_license_front: bool = False
+    has_license_back: bool = False
+    has_vehicle_photo: bool = False
+    has_vehicle_cedula: bool = False
+    has_vehicle_insurance: bool = False
     status: str | None = None
     identity_status: str | None = None
     license_status: str | None = None

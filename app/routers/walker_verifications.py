@@ -214,6 +214,14 @@ def get_my_verification(
 
     return WalkerVerificationStatusOut(
         has_verification=True,
+        has_dni_front=bool(v.dni_front_url),
+        has_dni_back=bool(v.dni_back_url),
+        has_selfie=bool(v.selfie_url),
+        has_license_front=bool(v.license_front_url),
+        has_license_back=bool(v.license_back_url),
+        has_vehicle_photo=bool(v.vehicle_photo_url),
+        has_vehicle_cedula=bool(v.vehicle_cedula_url),
+        has_vehicle_insurance=bool(v.vehicle_insurance_url),
         status=v.status.value,
         identity_status=v.identity_status.value,
         license_status=v.license_status.value,
