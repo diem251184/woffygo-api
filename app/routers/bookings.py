@@ -452,11 +452,37 @@ class TransportEtaRequest(BaseModel):
     )
 
 
+class TransportVoiceInstruction(BaseModel):
+    announcement: str
+    distance_along_geometry_m: float = Field(
+        ge=0, allow_inf_nan=False
+    )
+
+
+class TransportManeuver(BaseModel):
+    instruction: str
+    type: str
+    modifier: str | None = None
+    street_name: str | None = None
+    location: list[float]
+    distance_m: float = Field(
+        ge=0, allow_inf_nan=False
+    )
+    duration_seconds: float = Field(
+        ge=0, allow_inf_nan=False
+    )
+    geometry: list[list[float]] | None = None
+    voice_instructions: list[TransportVoiceInstruction] = Field(
+        default_factory=list
+    )
+
+
 class TransportEtaResponse(BaseModel):
     pickup_eta_seconds: float | None = None
     transport_eta_seconds: float | None = None
     pickup_distance_km: float | None = None
     transport_distance_km: float | None = None
+    transport_maneuvers: list[TransportManeuver] | None = None
     pickup_route_coordinates: list[list[float]] | None = None
     transport_route_coordinates: list[list[float]] | None = None
     calculated_at: datetime
@@ -527,6 +553,77 @@ def _transport_eta_details(
             seconds = None
 
     return seconds, coordinates, distance
+
+
+def _transport_navigation_eta_details(
+    origin_lat: float,
+    origin_lon: float,
+    dest_lat: float,
+    dest_lon: float,
+) -> tuple[
+    float | None,
+    list[list[float]] | None,
+    float | None,
+    list[TransportManeuver] | None,
+]:
+    from app.services.routing import (
+        get_driving_navigation_details,
+    )
+
+    try:
+        distance_km, duration, coordinates, maneuvers = (
+            get_driving_navigation_details(
+                origin_lat,
+                origin_lon,
+                dest_lat,
+                dest_lon,
+                include_geometry=True,
+            )
+        )
+    except HTTPException:
+        return None, None, None, None
+
+    def valid_number(value):
+        if value is None or isinstance(value, bool):
+            return None
+
+        try:
+            number = float(value)
+        except (ArithmeticError, ValueError, TypeError):
+            return None
+
+        if not math.isfinite(number) or number < 0:
+            return None
+
+        return number
+
+    seconds = valid_number(duration)
+    distance = valid_number(distance_km)
+
+    parsed_maneuvers = None
+
+    if (
+        isinstance(maneuvers, list)
+        and 0 < len(maneuvers) <= 1000
+        and seconds is not None
+        and distance is not None
+        and coordinates
+        and len(coordinates) >= 2
+    ):
+        try:
+            parsed_maneuvers = [
+                TransportManeuver(**item)
+                for item in maneuvers
+            ]
+        except (ValueError, TypeError):
+            parsed_maneuvers = None
+
+    return (
+        seconds,
+        coordinates,
+        distance,
+        parsed_maneuvers,
+    )
 
 
 TRANSPORT_ETA_COOLDOWN_SECONDS = 15
@@ -814,6 +911,7 @@ def get_transport_eta(
     transport_distance_km = None
     pickup_route_coordinates = None
     transport_route_coordinates = None
+    transport_maneuvers = None
 
     if booking.status == BookingStatus.IN_PROGRESS:
 
@@ -827,14 +925,16 @@ def get_transport_eta(
 
             _admit_transport_eta(db, current_user.id)
 
-            (transport_eta, transport_route_coordinates, transport_distance_km) = (
-                _transport_eta_details(
-                    payload.latitude,
-                    payload.longitude,
-                    dropoff_lat,
-                    dropoff_lon,
-                    include_geometry=True,
-                )
+            (
+                transport_eta,
+                transport_route_coordinates,
+                transport_distance_km,
+                transport_maneuvers,
+            ) = _transport_navigation_eta_details(
+                payload.latitude,
+                payload.longitude,
+                dropoff_lat,
+                dropoff_lon,
             )
 
     elif _valid_eta_coordinates(pickup_lat, pickup_lon):
@@ -872,6 +972,7 @@ def get_transport_eta(
         transport_eta_seconds=transport_eta,
         pickup_distance_km=pickup_distance_km,
         transport_distance_km=transport_distance_km,
+        transport_maneuvers=transport_maneuvers,
         pickup_route_coordinates=pickup_route_coordinates,
         transport_route_coordinates=transport_route_coordinates,
         calculated_at=datetime.now(timezone.utc),
