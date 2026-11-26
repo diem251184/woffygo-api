@@ -186,7 +186,119 @@ class Booking(Base):
 
     @property
     def current_distance_meters(self) -> Decimal | None:
-        return self.distance_meters
+        # Preserve the existing behavior for non-transport services.
+        if self.service_type != ServiceType.TRANSPORT:
+            return self.distance_meters
+
+        if self.started_at is None:
+            return None
+
+        from sqlalchemy import text
+        from sqlalchemy.orm import object_session
+
+        db = object_session(self)
+
+        if db is None or self.id is None:
+            return None
+
+        # Never use the quoted road distance as traveled distance.
+        # Calculate only from GPS samples recorded during this booking.
+        sql = text("""
+            WITH ordered_points AS (
+                SELECT
+                    id,
+                    location,
+                    recorded_at,
+                    accuracy_meters,
+                    speed_kmh,
+                    LAG(location) OVER w AS previous_location,
+                    LAG(recorded_at) OVER w AS previous_time,
+                    LAG(accuracy_meters) OVER w AS previous_accuracy,
+                    LAG(speed_kmh) OVER w AS previous_speed
+                FROM walk_locations
+                WHERE walk_id = :booking_id
+                  AND recorded_at >= :started_at
+                  AND (
+                      CAST(:ended_at AS timestamptz) IS NULL
+                      OR recorded_at <= CAST(:ended_at AS timestamptz)
+                  )
+                WINDOW w AS (
+                    ORDER BY recorded_at, id
+                )
+            ),
+            valid_pairs AS (
+                SELECT
+                    ST_Distance(
+                        CAST(location AS geography),
+                        CAST(previous_location AS geography)
+                    ) AS segment_m,
+                    EXTRACT(
+                        EPOCH FROM (recorded_at - previous_time)
+                    ) AS segment_s,
+                    GREATEST(
+                        5.0,
+                        accuracy_meters,
+                        previous_accuracy
+                    ) AS noise_threshold
+                FROM ordered_points
+                WHERE previous_location IS NOT NULL
+                  AND accuracy_meters BETWEEN 0 AND 50
+                  AND previous_accuracy BETWEEN 0 AND 50
+                  AND (
+                      speed_kmh IS NULL
+                      OR speed_kmh BETWEEN 0 AND 160
+                  )
+                  AND (
+                      previous_speed IS NULL
+                      OR previous_speed BETWEEN 0 AND 160
+                  )
+            ),
+            credible_segments AS (
+                SELECT
+                    segment_m,
+                    noise_threshold
+                FROM valid_pairs
+                WHERE segment_s > 0
+                  AND segment_s <= 60
+                  AND segment_m >= 0
+                  AND segment_m * 3.6
+                      <= segment_s * 160
+            )
+            SELECT
+                CASE
+                    WHEN COUNT(*) = 0 THEN NULL
+                    ELSE SUM(
+                        CASE
+                            WHEN segment_m <= noise_threshold
+                                THEN 0
+                            ELSE segment_m
+                        END
+                    )
+                END
+            FROM credible_segments
+        """)
+
+        ended_at = self.finished_at or self.cancelled_at
+
+        with db.no_autoflush:
+            distance = db.execute(
+                sql,
+                {
+                    "booking_id": self.id,
+                    "started_at": self.started_at,
+                    "ended_at": ended_at,
+                },
+            ).scalar_one()
+
+        if distance is None:
+            return None
+
+        value = Decimal(str(distance))
+
+        if not value.is_finite() or value < 0:
+            return None
+
+        return value.quantize(Decimal("0.01"))
 
 
 from sqlalchemy.dialects.postgresql import JSONB
