@@ -455,6 +455,8 @@ class TransportEtaRequest(BaseModel):
 class TransportEtaResponse(BaseModel):
     pickup_eta_seconds: float | None = None
     transport_eta_seconds: float | None = None
+    pickup_distance_km: float | None = None
+    transport_distance_km: float | None = None
     pickup_route_coordinates: list[list[float]] | None = None
     transport_route_coordinates: list[list[float]] | None = None
     calculated_at: datetime
@@ -484,9 +486,10 @@ def _transport_eta_details(
 ) -> tuple[
     float | None,
     list[list[float]] | None,
+    float | None,
 ]:
     try:
-        _, duration, coordinates = get_driving_route_details(
+        distance_km, duration, coordinates = get_driving_route_details(
             origin_lat,
             origin_lon,
             dest_lat,
@@ -494,19 +497,36 @@ def _transport_eta_details(
             include_geometry=include_geometry,
         )
     except HTTPException:
-        return None, None
+        return None, None, None
 
-    if duration is None:
-        return None, coordinates
+    distance = None
+    seconds = None
 
-    seconds = float(duration)
+    if distance_km is not None:
+        try:
+            parsed_distance = float(distance_km)
 
-    if not math.isfinite(seconds) or seconds < 0:
-        return None, coordinates
+            if (
+                math.isfinite(parsed_distance)
+                and parsed_distance >= 0
+            ):
+                distance = parsed_distance
+        except (ArithmeticError, ValueError, TypeError):
+            distance = None
 
-    return seconds, coordinates
+    if duration is not None:
+        try:
+            parsed_seconds = float(duration)
 
+            if (
+                math.isfinite(parsed_seconds)
+                and parsed_seconds >= 0
+            ):
+                seconds = parsed_seconds
+        except (ArithmeticError, ValueError, TypeError):
+            seconds = None
 
+    return seconds, coordinates, distance
 
 
 TRANSPORT_ETA_COOLDOWN_SECONDS = 15
@@ -790,6 +810,8 @@ def get_transport_eta(
 
     pickup_eta = None
     transport_eta = None
+    pickup_distance_km = None
+    transport_distance_km = None
     pickup_route_coordinates = None
     transport_route_coordinates = None
 
@@ -805,7 +827,7 @@ def get_transport_eta(
 
             _admit_transport_eta(db, current_user.id)
 
-            transport_eta, transport_route_coordinates = (
+            (transport_eta, transport_route_coordinates, transport_distance_km) = (
                 _transport_eta_details(
                     payload.latitude,
                     payload.longitude,
@@ -822,7 +844,7 @@ def get_transport_eta(
 
         _admit_transport_eta(db, current_user.id)
 
-        pickup_eta, pickup_route_coordinates = (
+        (pickup_eta, pickup_route_coordinates, pickup_distance_km) = (
             _transport_eta_details(
                 payload.latitude,
                 payload.longitude,
@@ -835,7 +857,7 @@ def get_transport_eta(
         if _valid_eta_coordinates(
             dropoff_lat, dropoff_lon
         ):
-            transport_eta, transport_route_coordinates = (
+            (transport_eta, transport_route_coordinates, transport_distance_km) = (
                 _transport_eta_details(
                     pickup_lat,
                     pickup_lon,
@@ -848,6 +870,8 @@ def get_transport_eta(
     return TransportEtaResponse(
         pickup_eta_seconds=pickup_eta,
         transport_eta_seconds=transport_eta,
+        pickup_distance_km=pickup_distance_km,
+        transport_distance_km=transport_distance_km,
         pickup_route_coordinates=pickup_route_coordinates,
         transport_route_coordinates=transport_route_coordinates,
         calculated_at=datetime.now(timezone.utc),
