@@ -30,13 +30,91 @@ PAYMENT_RECONCILIATION_READY = (
 )
 
 
+def _mp_qa_credential_matches(token):
+    if not isinstance(token, str) or not token:
+        return False
+
+    expected_digest = _mp_runtime_env.get(
+        "WOFFY_MP_TEST_ACCESS_TOKEN_SHA256", ""
+    ).strip().lower()
+
+    if (
+        len(expected_digest) != 64
+        or any(
+            char not in "0123456789abcdef"
+            for char in expected_digest
+        )
+    ):
+        return False
+
+    actual_digest = hashlib.sha256(
+        token.encode("utf-8")
+    ).hexdigest()
+
+    return hmac.compare_digest(
+        actual_digest,
+        expected_digest,
+    )
+
+
+def _mp_qa_checkout_url_allowed(value, preference_id):
+    if not isinstance(value, str) or not value:
+        return False
+
+    if (
+        not isinstance(preference_id, str)
+        or not preference_id
+        or len(preference_id) > 200
+        or any(ord(char) <= 32 for char in value)
+        or chr(92) in value
+    ):
+        return False
+
+    try:
+        parsed = urlparse(value)
+
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in {
+                "www.mercadopago.com.ar",
+                "sandbox.mercadopago.com.ar",
+            }
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port not in (None, 443)
+            or parsed.fragment
+            or parsed.path != "/checkout/v1/redirect"
+        ):
+            return False
+
+        from urllib.parse import parse_qs
+
+        query = parse_qs(
+            parsed.query,
+            keep_blank_values=True,
+        )
+
+        return query.get("pref_id") == [preference_id]
+
+    except (ValueError, TypeError):
+        return False
+
+
 def _sdk() -> mercadopago.SDK:
     if not settings.MERCADOPAGO_ACCESS_TOKEN:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="MercadoPago no está configurado. Falta MERCADOPAGO_ACCESS_TOKEN.",
         )
-    return mercadopago.SDK(settings.MERCADOPAGO_ACCESS_TOKEN)
+    token = settings.MERCADOPAGO_ACCESS_TOKEN
+
+    if not _mp_qa_credential_matches(token):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Credencial Mercado Pago TEST no acreditada",
+        )
+
+    return mercadopago.SDK(token)
 
 
 def _map_mp_status(mp_status: str) -> PaymentStatus:
@@ -149,6 +227,173 @@ def verify_mercadopago_signature(
     return valid
 
 
+def _mp_qa_positive_id(value):
+    if isinstance(value, bool):
+        return None
+
+    if not isinstance(value, (str, int)):
+        return None
+
+    value = str(value)
+
+    if (
+        not value
+        or not value.isascii()
+        or not value.isdecimal()
+        or value.startswith("0")
+        or len(value) > 20
+    ):
+        return None
+
+    return value
+
+
+def _mp_qa_allowed_ids(variable):
+    raw = _mp_runtime_env.get(variable, "")
+    parts = [item.strip() for item in raw.split(",")]
+
+    if not raw or any(
+        _mp_qa_positive_id(item) is None
+        for item in parts
+    ):
+        return frozenset()
+
+    return frozenset(parts)
+
+
+def _mp_qa_scope_allowed(owner_id, booking_id):
+    if (
+        _mp_runtime_env.get(
+            "WOFFY_MP_TEST_CHECKOUT_ENABLED"
+        ) != "1"
+    ):
+        return False
+
+    return (
+        _mp_qa_positive_id(owner_id)
+        in _mp_qa_allowed_ids("WOFFY_MP_TEST_OWNER_IDS")
+        and _mp_qa_positive_id(booking_id)
+        in _mp_qa_allowed_ids("WOFFY_MP_TEST_BOOKING_IDS")
+    )
+
+
+def _mp_qa_expected_accounts():
+    collector = _mp_qa_positive_id(
+        _mp_runtime_env.get("WOFFY_MP_TEST_COLLECTOR_ID")
+    )
+    payer = _mp_qa_positive_id(
+        _mp_runtime_env.get("WOFFY_MP_TEST_PAYER_ID")
+    )
+
+    if (
+        collector is None
+        or payer is None
+        or collector == payer
+    ):
+        return None
+
+    return collector, payer
+
+
+def _mp_qa_payment_allowed(mp_payment):
+    if not isinstance(mp_payment, dict):
+        return False
+
+    if mp_payment.get("live_mode") is not False:
+        return False
+
+    accounts = _mp_qa_expected_accounts()
+
+    if accounts is None:
+        return False
+
+    payer = mp_payment.get("payer")
+
+    if not isinstance(payer, dict):
+        return False
+
+    return (
+        _mp_qa_positive_id(mp_payment.get("collector_id"))
+        == accounts[0]
+        and _mp_qa_positive_id(payer.get("id"))
+        == accounts[1]
+    )
+
+
+def _mp_qa_pending_preference_allowed(
+    preference,
+    preference_id,
+    expected_reference,
+    expected_collector,
+    expected_amount,
+    expected_url,
+):
+    if not isinstance(preference, dict):
+        return False
+
+    if (
+        preference.get("id") != preference_id
+        or preference.get("external_reference")
+            != expected_reference
+        or _mp_qa_positive_id(
+            preference.get("collector_id")
+        ) != expected_collector
+        or preference.get("sandbox_init_point")
+            != expected_url
+        or not _mp_qa_checkout_url_allowed(
+            expected_url,
+            preference_id,
+        )
+    ):
+        return False
+
+    # Si el proveedor informa modo productivo,
+    # o un valor ambiguo, no reutilizar.
+    if (
+        "live_mode" in preference
+        and preference["live_mode"] is not False
+    ):
+        return False
+
+    items = preference.get("items")
+
+    if (
+        not isinstance(items, list)
+        or len(items) != 1
+        or not isinstance(items[0], dict)
+    ):
+        return False
+
+    item = items[0]
+
+    quantity = item.get("quantity")
+
+    if (
+        type(quantity) is not int
+        or quantity != 1
+        or item.get("currency_id") != "ARS"
+    ):
+        return False
+
+    try:
+        raw_amount = item.get("unit_price")
+
+        if isinstance(raw_amount, bool):
+            return False
+
+        amount = Decimal(str(raw_amount))
+
+        return (
+            amount.is_finite()
+            and amount > 0
+            and amount.as_tuple().exponent >= -2
+            and amount == expected_amount
+        )
+
+    except (InvalidOperation, ValueError, TypeError):
+        return False
+
+
 def create_checkout(
     db: Session,
     booking: Booking,
@@ -163,19 +408,10 @@ def create_checkout(
             detail="Checkout temporalmente suspendido durante la integracion segura",
         )
 
-    # Acceso adicional y cerrado por defecto para checkout TEST.
-    from os import environ
-    qa_enabled = environ.get("WOFFY_MP_TEST_CHECKOUT_ENABLED") == "1"
-    qa_raw_ids = environ.get("WOFFY_MP_TEST_OWNER_IDS", "")
-    qa_ids = [item.strip() for item in qa_raw_ids.split(",")]
-    qa_ids_valid = (
-        bool(qa_raw_ids)
-        and all(item.isascii() and item.isdecimal() for item in qa_ids)
-    )
+    # Autorizacion TEST compartida con conciliacion.
     if (
-        not qa_enabled
-        or not qa_ids_valid
-        or str(owner.id) not in qa_ids
+        not _mp_qa_scope_allowed(owner.id, booking.id)
+        or _mp_qa_expected_accounts() is None
     ):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -220,8 +456,19 @@ def create_checkout(
         db.query(Payment)
         .filter(Payment.booking_id == booking.id)
         .populate_existing()
+        .with_for_update(of=Payment)
         .first()
     )
+    # No reutilizar registros de origen desconocido o real.
+    if (
+        existing is not None
+        and existing.financial_origin != "TEST"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Origen financiero anterior no autorizado para TEST",
+        )
+
     if existing is not None and existing.status in (
         PaymentStatus.APPROVED,
         PaymentStatus.RELEASED,
@@ -256,6 +503,135 @@ def create_checkout(
                 detail="Checkout pendiente con importes diferentes a la reserva",
             )
         if existing.mp_preference_id and existing.init_point:
+            # No devolver enlaces pendientes sin identidad
+            # acreditada de la credencial y del intento.
+            if not _mp_qa_credential_matches(
+                settings.MERCADOPAGO_ACCESS_TOKEN
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Credencial Mercado Pago TEST no acreditada",
+                )
+
+            if not _mp_qa_checkout_url_allowed(
+                existing.init_point,
+                str(existing.mp_preference_id),
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Enlace de checkout pendiente no verificable",
+                )
+
+            pending_attempts = (
+                db.query(PaymentAttempt)
+                .filter(
+                    PaymentAttempt.payment_id == existing.id,
+                    PaymentAttempt.mp_preference_id
+                    == existing.mp_preference_id,
+                )
+                .all()
+            )
+
+            if (
+                len(pending_attempts) != 1
+                or pending_attempts[0].status != "created"
+                or pending_attempts[0].amount != existing.amount
+                or pending_attempts[0].currency != "ARS"
+                or pending_attempts[0].mp_payment_id is not None
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Intento pendiente no verificable",
+                )
+
+            # Solo recuperar una preferencia ya creada y
+            # acreditada como TEST. Nunca crear otra aqui.
+            if (
+                existing.financial_origin != "TEST"
+                or existing.payer_id != owner.id
+                or existing.mp_payment_id is not None
+                or existing.approved_at is not None
+                or existing.released_at is not None
+                or existing.dispute_opened_at is not None
+                or existing.dispute_resolved_at is not None
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Pago pendiente fuera del alcance TEST",
+                )
+
+            attempt = pending_attempts[0]
+
+            attempt_count = (
+                db.query(PaymentAttempt.id)
+                .filter(
+                    PaymentAttempt.payment_id == existing.id
+                )
+                .count()
+            )
+
+            registered_charge = (
+                db.query(PaymentAttemptCharge.id)
+                .join(
+                    PaymentAttempt,
+                    PaymentAttempt.id
+                    == PaymentAttemptCharge.attempt_id,
+                )
+                .filter(
+                    PaymentAttempt.payment_id == existing.id
+                )
+                .first()
+            )
+
+            if (
+                attempt_count != 1
+                or registered_charge is not None
+                or not isinstance(attempt.attempt_key, str)
+                or not attempt.attempt_key
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Pago pendiente requiere conciliacion previa",
+                )
+
+            accounts = _mp_qa_expected_accounts()
+
+            if accounts is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Cuentas TEST no acreditadas",
+                )
+
+            sdk = _sdk()
+
+            try:
+                result = sdk.preference().get(
+                    str(existing.mp_preference_id)
+                )
+
+            except Exception:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="No se pudo verificar la preferencia TEST",
+                )
+
+            if (
+                not isinstance(result, dict)
+                or result.get("status") != 200
+                or not _mp_qa_pending_preference_allowed(
+                    result.get("response"),
+                    str(existing.mp_preference_id),
+                    f"{booking.id}:{attempt.attempt_key}",
+                    accounts[0],
+                    existing.amount,
+                    existing.init_point,
+                )
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Preferencia pendiente no acreditada",
+                )
+
             return existing
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -305,13 +681,29 @@ def create_checkout(
 
     preference = result["response"]
     raw_preference_id = preference.get("id")
-    init_point = preference.get("init_point") or preference.get("sandbox_init_point")
+    init_point = preference.get("sandbox_init_point")
     if not raw_preference_id or not isinstance(init_point, str) or not init_point:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Mercado Pago devolvio una preferencia incompleta",
         )
     preference_id = str(raw_preference_id)
+
+    expected_accounts = _mp_qa_expected_accounts()
+
+    if (
+        expected_accounts is None
+        or _mp_qa_positive_id(preference.get("collector_id"))
+            != expected_accounts[0]
+        or not _mp_qa_checkout_url_allowed(
+            init_point,
+            preference_id,
+        )
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Preferencia TEST no acreditada",
+        )
 
     if existing is not None:
         payment = existing
@@ -326,6 +718,7 @@ def create_checkout(
         payment.approved_at = None
     else:
         payment = Payment(
+            financial_origin="TEST",
             booking_id=booking.id,
             payer_id=owner.id,
             amount=booking.price_total,
@@ -637,6 +1030,42 @@ def sync_payment_from_mp(db: Session, mp_payment_id: str) -> Payment | None:
                 detail="No existe un pago principal para el intento notificado",
             )
 
+        # Aislamiento QA antes de registrar cobros.
+        if (
+            not PAYMENT_ATTEMPT_WEBHOOK_READY
+            or payment_for_attempt.financial_origin != "TEST"
+            or not _mp_qa_scope_allowed(
+                payment_for_attempt.payer_id,
+                payment_for_attempt.booking_id,
+            )
+            or not _mp_qa_payment_allowed(mp_payment)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Transaccion fuera del entorno TEST autorizado",
+            )
+
+        # Verificar que el propietario actual coincide
+        # con el pagador del registro financiero.
+        qa_booking = db.get(
+            Booking,
+            payment_for_attempt.booking_id,
+        )
+
+        if (
+            qa_booking is None
+            or qa_booking.id != booking_id
+            or qa_booking.owner_id != payment_for_attempt.payer_id
+            or not _mp_qa_scope_allowed(
+                qa_booking.owner_id,
+                qa_booking.id,
+            )
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Reserva fuera del alcance financiero autorizado",
+            )
+
         attempt = (
             db.query(PaymentAttempt)
             .filter(
@@ -902,7 +1331,7 @@ def sync_payment_from_mp(db: Session, mp_payment_id: str) -> Payment | None:
         # Cerrar el intento solo tras conciliacion exitosa.
         # Preservar estados de revision manual.
         if reconciled:
-            attempt.mp_payment_id = mp_id
+            attempt.mp_payment_id = str(mp_payment_id)
             if attempt.status == "created":
                 attempt.status = "approved"
 
@@ -1024,11 +1453,81 @@ def sync_payment_from_mp(db: Session, mp_payment_id: str) -> Payment | None:
                         payment_for_attempt.mp_status_detail = detail
                         reconciled = True
 
+        # Reconocer una notificacion repetida solamente
+        # cuando existe evidencia de aprobacion previa.
+        already_reconciled = False
+
+        if (
+            PAYMENT_RECONCILIATION_READY
+            and not reconciled
+            and new_status == PaymentStatus.APPROVED
+            and decision == "single_approved_candidate"
+            and not previous_attempt_alert
+            and payment_for_attempt.status == PaymentStatus.APPROVED
+            and payment_for_attempt.approved_at is not None
+            and payment_for_attempt.released_at is None
+            and payment_for_attempt.dispute_opened_at is None
+            and payment_for_attempt.dispute_resolved_at is None
+            and payment_for_attempt.mp_payment_id == str(mp_payment_id)
+            and attempt.status == "approved"
+            and attempt.payment_id == payment_for_attempt.id
+            and attempt.mp_payment_id == str(mp_payment_id)
+            and bool(attempt.mp_preference_id)
+            and charge.attempt_id == attempt.id
+            and charge.mp_payment_id == str(mp_payment_id)
+            and charge.status == PaymentStatus.APPROVED.value
+            and charge.currency == "ARS"
+            and attempt.currency == "ARS"
+            and charge.amount is not None
+            and charge.amount > 0
+            and charge.amount == payment_for_attempt.amount
+            and charge.amount == attempt.amount
+            and len(charge_status_rows) == 1
+        ):
+            repeated_review = (
+                db.query(PaymentAttempt.id)
+                .filter(
+                    PaymentAttempt.payment_id == payment_for_attempt.id,
+                    PaymentAttempt.status.in_(
+                        ("manual_review", "duplicate_approved_review")
+                    ),
+                )
+                .first()
+            )
+
+            if repeated_review is None:
+                approval_event_key = (
+                    "mp-approved:" + str(mp_payment_id)
+                )
+
+                previous_approval = (
+                    db.query(PaymentStatusEvent)
+                    .filter(
+                        PaymentStatusEvent.payment_id
+                        == payment_for_attempt.id,
+                        PaymentStatusEvent.event_key
+                        == approval_event_key,
+                        PaymentStatusEvent.event_source
+                        == "mercadopago",
+                        PaymentStatusEvent.previous_status
+                        == PaymentStatus.PENDING.value,
+                        PaymentStatusEvent.new_status
+                        == PaymentStatus.APPROVED.value,
+                        PaymentStatusEvent.mp_payment_id
+                        == str(mp_payment_id),
+                    )
+                    .one_or_none()
+                )
+
+                already_reconciled = (
+                    previous_approval is not None
+                )
+
         # Charge, Payment y PaymentStatusEvent participan de
         # una sola transaccion. El helper no hace commit.
         db.commit()
 
-        if reconciled:
+        if reconciled or already_reconciled:
             db.refresh(payment_for_attempt)
             return payment_for_attempt
 

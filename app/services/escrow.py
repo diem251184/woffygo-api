@@ -122,6 +122,12 @@ def confirm_delivery(db: Session, payment_id: int, current_user: User) -> Paymen
             detail="No se puede confirmar la entrega de un servicio que no figura como completado",
         )
 
+    if payment.financial_origin != "REAL":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="El origen financiero no permite liberar fondos",
+        )
+
     payment.confirmed_by_owner_at = _now()
     _assert_no_financial_alerts(db, payment)
     payment.status = PaymentStatus.RELEASED
@@ -175,6 +181,12 @@ def release_payment(db: Session, payment_id: int) -> Payment:
             detail="El servicio debe estar completado para liberar los fondos contables",
         )
 
+    if payment.financial_origin != "REAL":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="El origen financiero no permite liberar fondos",
+        )
+
     _assert_no_financial_alerts(db, payment)
     payment.status = PaymentStatus.RELEASED
     _record_internal_payment_transition(db, payment, PaymentStatus.APPROVED, "escrow_manual_release")
@@ -194,6 +206,7 @@ def release_expired_payments(db: Session) -> list[int]:
         db.query(Payment)
         .join(Booking, Payment.booking_id == Booking.id)
         .filter(Payment.status == PaymentStatus.APPROVED)
+        .filter(Payment.financial_origin == "REAL")
         .filter(Payment.dispute_opened_at.is_(None))
         .filter(Booking.status == BookingStatus.COMPLETED)
         .filter(Payment.payment_release_deadline.is_not(None))
@@ -203,6 +216,8 @@ def release_expired_payments(db: Session) -> list[int]:
     )
     released_ids: list[int] = []
     for payment in expired:
+        if payment.financial_origin != "REAL":
+            continue
         _assert_no_financial_alerts(db, payment)
         payment.status = PaymentStatus.RELEASED
         _record_internal_payment_transition(db, payment, PaymentStatus.APPROVED, "escrow_expiry_release")
@@ -233,6 +248,12 @@ def resolve_dispute(
         )
 
     if release_to_provider:
+        if payment.financial_origin != "REAL":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="El origen financiero no permite liberar fondos",
+            )
+
         resolved_at = _now()
         _assert_no_financial_alerts(db, payment)
         payment.status = PaymentStatus.RELEASED

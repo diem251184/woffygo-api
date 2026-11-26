@@ -504,20 +504,24 @@ def get_admin_stats(
 
     # Dinero
     revenue_total = db.query(sqlfunc.coalesce(sqlfunc.sum(Payment.platform_fee), 0)).filter(
+        Payment.financial_origin == "REAL",
         Payment.status == PaymentStatus.RELEASED
     ).scalar() or Decimal("0")
 
     revenue_this_month = db.query(sqlfunc.coalesce(sqlfunc.sum(Payment.platform_fee), 0)).filter(
+        Payment.financial_origin == "REAL",
         Payment.status == PaymentStatus.RELEASED,
         Payment.released_at >= month_start,
     ).scalar() or Decimal("0")
 
     escrow_pending_total = db.query(sqlfunc.coalesce(sqlfunc.sum(Payment.amount), 0)).filter(
+        Payment.financial_origin == "REAL",
         Payment.status == PaymentStatus.APPROVED,
         Payment.payment_release_deadline.isnot(None),
     ).scalar() or Decimal("0")
 
     disputed_total = db.query(sqlfunc.coalesce(sqlfunc.sum(Payment.amount), 0)).filter(
+        Payment.financial_origin == "REAL",
         Payment.status == PaymentStatus.DISPUTED
     ).scalar() or Decimal("0")
 
@@ -526,18 +530,21 @@ def get_admin_stats(
     released_commissions_historical_total = db.query(
         sqlfunc.coalesce(sqlfunc.sum(Payment.platform_fee), 0)
     ).filter(
+        Payment.financial_origin == "REAL",
         Payment.released_at.isnot(None)
     ).scalar() or Decimal("0")
 
     refunded_amount_total = db.query(
         sqlfunc.coalesce(sqlfunc.sum(Payment.amount), 0)
     ).filter(
+        Payment.financial_origin == "REAL",
         Payment.status == PaymentStatus.REFUNDED
     ).scalar() or Decimal("0")
 
     chargeback_amount_total = db.query(
         sqlfunc.coalesce(sqlfunc.sum(Payment.amount), 0)
     ).filter(
+        Payment.financial_origin == "REAL",
         Payment.status == PaymentStatus.CHARGED_BACK
     ).scalar() or Decimal("0")
 

@@ -29,6 +29,27 @@ class PaymentStatus(str, enum.Enum):
 class Payment(Base):
     __tablename__ = "payments"
 
+    from sqlalchemy import CheckConstraint as _OriginCheck
+
+    __table_args__ = (
+        _OriginCheck(
+            "financial_origin IN ('TEST', 'REAL', 'UNVERIFIED')",
+            name="ck_payments_financial_origin",
+        ),
+        _OriginCheck(
+            "financial_origin <> 'TEST' OR "
+            "(status <> 'liberado' AND released_at IS NULL)",
+            name="ck_payments_test_not_released",
+        ),
+    )
+
+    financial_origin: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="UNVERIFIED",
+        server_default="UNVERIFIED",
+    )
+
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     booking_id: Mapped[int] = mapped_column(
         ForeignKey("bookings.id", ondelete="CASCADE"), nullable=False, index=True, unique=True
