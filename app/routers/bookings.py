@@ -1209,6 +1209,11 @@ def get_booking_locations(
     if booking.owner_id != current_user.id and booking.provider_id != current_user.id and current_user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="No autorizado a ver este viaje")
 
+    recent_transport_locations = (
+        booking.service_type == ServiceType.TRANSPORT
+        and booking.status == BookingStatus.IN_PROGRESS
+    )
+
     query = (
         db.query(
             WalkLocation.id,
@@ -1219,14 +1224,34 @@ def get_booking_locations(
             WalkLocation.recorded_at,
         )
         .filter(WalkLocation.walk_id == booking_id)
+        .order_by(
+            WalkLocation.recorded_at.desc(),
+            WalkLocation.id.desc(),
+        )
+        if recent_transport_locations
+        else db.query(
+            WalkLocation.id,
+            WalkLocation.walk_id,
+            func.ST_AsGeoJSON(
+                WalkLocation.location
+            ).label("geojson"),
+            WalkLocation.accuracy_meters,
+            WalkLocation.speed_kmh,
+            WalkLocation.recorded_at,
+        )
+        .filter(WalkLocation.walk_id == booking_id)
         .order_by(WalkLocation.recorded_at.asc())
-        .limit(limit)
     )
 
     from math import isfinite
 
     results = []
-    for r in query.all():
+    rows = query.limit(limit).all()
+
+    if recent_transport_locations:
+        rows.reverse()
+
+    for r in rows:
         if not r.geojson:
             continue
 
@@ -1263,3 +1288,216 @@ def get_booking_locations(
         })
 
     return results
+
+class OwnerTransportTrackingResponse(BaseModel):
+    booking_id: int
+    position: list[float] | None = None
+    recorded_at: str | None = None
+    accuracy_meters: float | None = None
+    position_age_seconds: float | None = None
+    gps_fresh: bool = False
+    transport_eta_seconds: float | None = None
+    transport_distance_km: float | None = None
+    transport_route_coordinates: list[list[float]] | None = None
+    calculated_at: str | None = None
+
+
+@router.get(
+    "/{booking_id}/transport-tracking",
+    response_model=OwnerTransportTrackingResponse,
+)
+def get_owner_transport_tracking(
+    booking_id: int,
+    current_user: User = Depends(
+        require_role(UserRole.OWNER)
+    ),
+    db: Session = Depends(get_db),
+):
+    from datetime import datetime, timezone
+    from math import isfinite
+
+    booking = (
+        db.query(Booking)
+        .filter(
+            Booking.id == booking_id,
+            Booking.owner_id == current_user.id,
+            Booking.service_type == ServiceType.TRANSPORT,
+            Booking.status == BookingStatus.IN_PROGRESS,
+        )
+        .first()
+    )
+
+    if booking is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Traslado activo no disponible.",
+        )
+
+    response = OwnerTransportTrackingResponse(
+        booking_id=booking.id,
+    )
+
+    if (
+        booking.provider_id is None
+        or booking.started_at is None
+    ):
+        return response
+
+    # Utilizar exclusivamente coordenadas
+    # registradas para esta reserva desde su inicio.
+    #
+    # El propietario no proporciona coordenadas.
+
+    rows = (
+        db.query(
+            WalkLocation.id,
+            WalkLocation.recorded_at,
+            WalkLocation.accuracy_meters,
+            func.ST_AsGeoJSON(
+                WalkLocation.location
+            ).label("geojson"),
+        )
+        .filter(
+            WalkLocation.walk_id == booking.id,
+            WalkLocation.recorded_at >= booking.started_at,
+            WalkLocation.accuracy_meters.isnot(None),
+            WalkLocation.accuracy_meters >= 0,
+            WalkLocation.accuracy_meters <= 50,
+        )
+        .order_by(
+            WalkLocation.recorded_at.desc(),
+            WalkLocation.id.desc(),
+        )
+        .limit(20)
+        .all()
+    )
+
+    now = datetime.now(timezone.utc)
+
+    for row in rows:
+        try:
+            geometry = json.loads(row.geojson)
+
+            if geometry.get("type") != "Point":
+                continue
+
+            coords = geometry.get("coordinates")
+
+            if (
+                not isinstance(coords, (list, tuple))
+                or len(coords) < 2
+            ):
+                continue
+
+            lon = float(coords[0])
+            lat = float(coords[1])
+            accuracy = float(row.accuracy_meters)
+
+            if not (
+                isfinite(lon)
+                and isfinite(lat)
+                and isfinite(accuracy)
+                and -180 <= lon <= 180
+                and -90 <= lat <= 90
+                and 0 <= accuracy <= 50
+            ):
+                continue
+
+            recorded = row.recorded_at
+
+            if (
+                recorded is None
+                or recorded.tzinfo is None
+                or recorded.utcoffset() is None
+            ):
+                continue
+
+            recorded = recorded.astimezone(timezone.utc)
+
+            age = (now - recorded).total_seconds()
+
+            if not isfinite(age) or age < 0:
+                continue
+
+        except (
+            TypeError,
+            ValueError,
+            AttributeError,
+            ArithmeticError,
+        ):
+            continue
+
+        response.position = [lon, lat]
+        response.recorded_at = recorded.isoformat()
+        response.accuracy_meters = accuracy
+        response.position_age_seconds = age
+        response.gps_fresh = age <= 60
+
+        break
+
+    # Una posicion antigua puede visualizarse como
+    # ultima ubicacion conocida, pero no como GPS activo.
+    # No solicitar una estimacion vial con ese dato.
+
+    if (
+        response.position is None
+        or not response.gps_fresh
+    ):
+        return response
+
+    destination_lat = booking.dropoff_latitude
+    destination_lon = booking.dropoff_longitude
+
+    if (
+        destination_lat is None
+        or destination_lon is None
+    ):
+        return response
+
+    try:
+        destination_lat = float(destination_lat)
+        destination_lon = float(destination_lon)
+    except (TypeError, ValueError, ArithmeticError):
+        return response
+
+    if not (
+        isfinite(destination_lat)
+        and isfinite(destination_lon)
+        and -90 <= destination_lat <= 90
+        and -180 <= destination_lon <= 180
+    ):
+        return response
+
+    # Conservar el control de frecuencia backend.
+    # No crear una via alternativa sin limite.
+
+    _admit_transport_eta(db, current_user.id)
+
+    seconds, coordinates, distance = (
+        _transport_eta_details(
+            response.position[1],
+            response.position[0],
+            destination_lat,
+            destination_lon,
+            include_geometry=True,
+        )
+    )
+
+    if (
+        seconds is not None
+        and isfinite(seconds)
+        and seconds >= 0
+        and distance is not None
+        and isfinite(distance)
+        and distance >= 0
+        and coordinates
+        and len(coordinates) >= 2
+    ):
+        response.transport_eta_seconds = seconds
+        response.transport_distance_km = distance
+        response.transport_route_coordinates = coordinates
+        response.calculated_at = (
+            datetime.now(timezone.utc).isoformat()
+        )
+
+    return response
