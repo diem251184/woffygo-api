@@ -300,7 +300,26 @@ def _mp_qa_payment_allowed(mp_payment):
         return False
 
     if mp_payment.get("live_mode") is not False:
-        return False
+        # Excepcion QA individual, deshabilitada por defecto.
+        # No altera el valor original informado por Mercado Pago.
+        if not (
+            mp_payment.get("live_mode") is True
+            and _mp_runtime_env.get(
+                "WOFFY_MP_QA_RECOVERY_190593419251"
+            ) == "1"
+            and _mp_qa_scope_allowed(13, 93)
+            and _mp_qa_expected_accounts()
+            == ("3099837526", "3098494032")
+            and _mp_qa_positive_id(mp_payment.get("id"))
+            == "190593419251"
+            and mp_payment.get("external_reference")
+            == "93:dbe3d7fc3dcb4b5a9c0e3c225b46832a"
+            and mp_payment.get("currency_id") == "ARS"
+            and type(mp_payment.get("transaction_amount"))
+            in (int, float)
+            and mp_payment.get("transaction_amount") == 10905
+        ):
+            return False
 
     accounts = _mp_qa_expected_accounts()
 
