@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Integer, Float, DateTime, ForeignKey, func
+from sqlalchemy import Integer, Float, DateTime, ForeignKey, func, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from geoalchemy2 import Geography
 
@@ -20,6 +20,18 @@ class WalkLocation(Base):
     speed_kmh: Mapped[float | None] = mapped_column(Float, nullable=True)
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+    # Device capture time, distinct from server receipt time.
+    # Historical samples remain NULL.
+    captured_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # Client-reported mock indicator; not device attestation.
+    is_mocked: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True
     )
 
     booking = relationship(

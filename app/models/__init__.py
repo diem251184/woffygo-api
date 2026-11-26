@@ -48,3 +48,5 @@ __all__ = [
     "SafetyReport",
     "SafetyCategory",
 ]
+
+from app.models.transport_delivery_credential import TransportDeliveryCredential

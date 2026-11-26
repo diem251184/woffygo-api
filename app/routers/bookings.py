@@ -43,7 +43,49 @@ from app.services.routing import (
     get_driving_route_details,
 )
 
-router = APIRouter(prefix="/bookings", tags=["bookings"])
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
+from fastapi.responses import JSONResponse
+
+
+class DeliveryProtectedRoute(APIRoute):
+    def get_route_handler(self):
+        original_handler = super().get_route_handler()
+
+        sensitive_route = (
+            self.path.endswith("/{booking_id}/status")
+            or self.path.endswith("/{booking_id}/delivery-pin")
+            or self.path.endswith("/{booking_id}/delivery-receipt")
+        )
+
+        async def protected_handler(request):
+            try:
+                return await original_handler(request)
+
+            except RequestValidationError as exc:
+                if not sensitive_route:
+                    raise
+
+                # Never return raw input, request body,
+                # exception context or user-controlled keys.
+
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "detail": (
+                            "Datos de reserva o entrega "
+                            "no validos"
+                        )
+                    },
+                    headers={
+                        "Cache-Control": "no-store, private",
+                    },
+                )
+
+        return protected_handler
+
+
+router = APIRouter(prefix="/bookings", tags=["bookings"], route_class=DeliveryProtectedRoute)
 
 
 def _attach_extra_fields(db: Session, booking: Booking) -> None:
@@ -1156,7 +1198,16 @@ def update_status(
     elif payload.status == BookingStatus.IN_PROGRESS:
         b = start_booking(db, current_user, booking_id)
     elif payload.status == BookingStatus.COMPLETED:
-        b = finish_booking(db, current_user, booking_id)
+        b = finish_booking(
+            db,
+            current_user,
+            booking_id,
+            delivery_pin=(
+                payload.delivery_pin.get_secret_value()
+                if payload.delivery_pin is not None
+                else None
+            ),
+        )
     elif payload.status == BookingStatus.CANCELLED:
         b = cancel_booking(db, current_user, booking_id, payload.reason)
     else:
@@ -1181,18 +1232,90 @@ def add_location(
     current_user: User = Depends(require_role(UserRole.WALKER)),
     db: Session = Depends(get_db),
 ):
-    booking = get_booking_or_404(db, booking_id)
+    booking = (
+        db.query(Booking)
+        .filter(Booking.id == booking_id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+
+    if booking is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Reserva no encontrada",
+        )
     if booking.provider_id != current_user.id:
         raise HTTPException(status_code=403, detail="No asignado a esta reserva")
     if booking.status != BookingStatus.IN_PROGRESS:
         raise HTTPException(status_code=400, detail="Solo se reporta ubicación en servicios en progreso")
+
+    captured_at = payload.captured_at
+    received_at = datetime.now(timezone.utc)
+
+    if captured_at is not None:
+        if (
+            captured_at.tzinfo is None
+            or captured_at.utcoffset() is None
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="La fecha de captura GPS requiere zona horaria",
+            )
+
+        captured_at = captured_at.astimezone(timezone.utc)
+
+        if (
+            captured_at - received_at
+        ).total_seconds() > 5:
+            raise HTTPException(
+                status_code=422,
+                detail="Fecha de captura GPS futura no valida",
+            )
+
+    if booking.service_type == ServiceType.TRANSPORT:
+        if (
+            not math.isfinite(payload.latitude)
+            or not math.isfinite(payload.longitude)
+            or not -90 <= payload.latitude <= 90
+            or not -180 <= payload.longitude <= 180
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Coordenadas GPS no validas",
+            )
+
+        if payload.accuracy_meters is not None:
+            if (
+                not math.isfinite(payload.accuracy_meters)
+                or payload.accuracy_meters < 0
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Precision GPS no valida",
+                )
+
+        if payload.speed_kmh is not None:
+            if (
+                not math.isfinite(payload.speed_kmh)
+                or payload.speed_kmh < 0
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Velocidad GPS no valida",
+                )
 
     loc = WalkLocation(
         walk_id=booking.id,
         location=WKTElement(f"POINT({payload.longitude} {payload.latitude})", srid=4326),
         accuracy_meters=payload.accuracy_meters,
         speed_kmh=payload.speed_kmh,
+        captured_at=captured_at,
+        is_mocked=payload.is_mocked,
     )
+    if booking.service_type == ServiceType.TRANSPORT:
+        loc.recorded_at = received_at
+
     db.add(loc)
     db.commit()
     return {"status": "ok"}
@@ -1501,3 +1624,452 @@ def get_owner_transport_tracking(
         )
 
     return response
+
+@router.post("/{booking_id}/delivery-pin")
+def get_owner_transport_delivery_pin(
+    booking_id: int,
+    current_user: User = Depends(
+        require_role(UserRole.OWNER)
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Generate or retrieve the private delivery PIN.
+
+    Only the owner of an active transport may obtain it.
+    """
+
+    from fastapi.responses import JSONResponse
+
+    from app.services.transport_delivery import (
+        get_or_create_owner_delivery_pin,
+    )
+
+    booking = (
+        db.query(Booking)
+        .filter(Booking.id == booking_id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+
+    if (
+        booking is None
+        or booking.owner_id != current_user.id
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Reserva no encontrada",
+        )
+
+    if (
+        booking.service_type != ServiceType.TRANSPORT
+        or booking.status != BookingStatus.IN_PROGRESS
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="PIN de entrega no disponible",
+        )
+
+    pin = get_or_create_owner_delivery_pin(
+        db,
+        booking,
+        current_user.id,
+    )
+
+    booking_identifier = booking.id
+
+    # Credential creation must be persisted before
+    # exposing the PIN to the authorized owner.
+
+    db.commit()
+
+    return JSONResponse(
+        content={
+            "booking_id": booking_identifier,
+            "delivery_pin": pin,
+        },
+        headers={
+            "Cache-Control": (
+                "no-store, no-cache, private, "
+                "max-age=0, must-revalidate"
+            ),
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@router.get("/{booking_id}/transport-arrival")
+def get_provider_transport_arrival(
+    booking_id: int,
+    current_user: User = Depends(
+        require_role(UserRole.WALKER)
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Read-only arrival and delivery readiness.
+
+    This endpoint never exposes the PIN and cannot
+    complete a transport.
+    """
+
+    from fastapi.responses import JSONResponse
+
+    from app.services.transport_arrival import (
+        evaluate_transport_arrival,
+    )
+
+    from app.models.transport_delivery_credential import (
+        TransportDeliveryCredential,
+    )
+
+    booking = (
+        db.query(Booking)
+        .filter(Booking.id == booking_id)
+        .one_or_none()
+    )
+
+    if (
+        booking is None
+        or booking.provider_id != current_user.id
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Reserva no encontrada",
+        )
+
+    if (
+        booking.service_type != ServiceType.TRANSPORT
+        or booking.status != BookingStatus.IN_PROGRESS
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Traslado no disponible para entrega",
+        )
+
+    evidence = evaluate_transport_arrival(
+        db,
+        booking,
+    )
+
+    credential = (
+        db.query(TransportDeliveryCredential)
+        .filter(
+            TransportDeliveryCredential.booking_id
+            == booking.id
+        )
+        .one_or_none()
+    )
+
+    pin_ready = (
+        credential is not None
+        and credential.used_at is None
+        and credential.invalidated_at is None
+    )
+
+    now = datetime.now(timezone.utc)
+
+    pin_locked = bool(
+        pin_ready
+        and credential.locked_until is not None
+        and credential.locked_until > now
+    )
+
+    return JSONResponse(
+        content={
+            "booking_id": booking.id,
+            "arrival_eligible": evidence.eligible,
+            "arrival_reason": evidence.reason,
+            "distance_meters": evidence.distance_meters,
+            "valid_samples": evidence.valid_samples,
+            "dwell_seconds": evidence.dwell_seconds,
+            "pin_ready": bool(pin_ready),
+            "pin_locked": pin_locked,
+            "can_submit_delivery": bool(
+                evidence.eligible
+                and pin_ready
+                and not pin_locked
+            ),
+            "checked_at": now.isoformat(),
+        },
+        headers={
+            "Cache-Control": "no-store, private",
+            "Pragma": "no-cache",
+        },
+    )
+
+@router.post("/{booking_id}/delivery-receipt")
+def confirm_transport_receipt(
+    booking_id: int,
+    current_user: User = Depends(
+        require_role(UserRole.OWNER)
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Confirm physical receipt of the animal.
+
+    Physical receipt is persisted before protected financial confirmation.
+    """
+
+    from fastapi.responses import JSONResponse
+
+    from app.models.transport_delivery_credential import (
+        TransportDeliveryCredential,
+    )
+
+    booking = (
+        db.query(Booking)
+        .filter(Booking.id == booking_id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+
+    if (
+        booking is None
+        or booking.owner_id != current_user.id
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Reserva no encontrada",
+        )
+
+    if (
+        booking.service_type != ServiceType.TRANSPORT
+        or booking.status != BookingStatus.COMPLETED
+        or booking.finished_at is None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="El traslado no figura como completado",
+        )
+
+    credential = (
+        db.query(TransportDeliveryCredential)
+        .filter(
+            TransportDeliveryCredential.booking_id
+            == booking.id
+        )
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+
+    if (
+        credential is None
+        or credential.used_at is None
+        or credential.invalidated_at is not None
+        or credential.used_at > booking.finished_at
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="La entrega no esta acreditada",
+        )
+
+    if credential.owner_received_at is None:
+        credential.owner_received_at = (
+            datetime.now(timezone.utc)
+        )
+
+    result = {
+        "booking_id": booking.id,
+        "receipt_confirmed": True,
+        "owner_received_at": (
+            credential.owner_received_at.isoformat()
+        ),
+    }
+
+    db.commit()
+
+    # The physical receipt is already durable.
+    # Financial errors must not erase it.
+
+    result["financial_result"] = (
+        _transport_receipt_financial_result(
+            db,
+            booking_id,
+            current_user,
+            process=True,
+        )
+    )
+
+    return JSONResponse(
+        content=result,
+        headers={"Cache-Control": "no-store, private"},
+    )
+
+
+@router.get("/{booking_id}/delivery-receipt")
+def get_transport_receipt(
+    booking_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from fastapi.responses import JSONResponse
+
+    from app.models.transport_delivery_credential import (
+        TransportDeliveryCredential,
+    )
+
+    booking = db.get(Booking, booking_id)
+
+    if booking is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Reserva no encontrada",
+        )
+
+    authorized = (
+        (
+            current_user.role == UserRole.OWNER
+            and booking.owner_id == current_user.id
+        )
+        or
+        (
+            current_user.role == UserRole.WALKER
+            and booking.provider_id == current_user.id
+        )
+    )
+
+    if not authorized:
+        raise HTTPException(
+            status_code=404,
+            detail="Reserva no encontrada",
+        )
+
+    if booking.service_type != ServiceType.TRANSPORT:
+        raise HTTPException(
+            status_code=409,
+            detail="Recepcion no disponible",
+        )
+
+    credential = (
+        db.query(TransportDeliveryCredential)
+        .filter(
+            TransportDeliveryCredential.booking_id
+            == booking.id
+        )
+        .one_or_none()
+    )
+
+    received_at = None
+
+    if (
+        booking.status == BookingStatus.COMPLETED
+        and credential is not None
+        and credential.used_at is not None
+        and credential.invalidated_at is None
+    ):
+        received_at = credential.owner_received_at
+
+    financial_result = "NOT_CONFIRMED"
+
+    if received_at is not None:
+        if current_user.role == UserRole.OWNER:
+            financial_result = (
+                _transport_receipt_financial_result(
+                    db,
+                    booking.id,
+                    current_user,
+                    process=False,
+                )
+            )
+        else:
+            financial_result = "NOT_APPLICABLE"
+
+    return JSONResponse(
+        content={
+            "booking_id": booking.id,
+            "financial_result": financial_result,
+            "receipt_confirmed": received_at is not None,
+            "owner_received_at": (
+                received_at.isoformat()
+                if received_at is not None
+                else None
+            ),
+        },
+        headers={"Cache-Control": "no-store, private"},
+    )
+
+def _transport_receipt_financial_result(
+    db: Session,
+    booking_id: int,
+    owner,
+    *,
+    process: bool = False,
+) -> str:
+    from app.models.payment import Payment, PaymentStatus
+    from app.services.escrow import confirm_delivery
+
+    payment = (
+        db.query(Payment)
+        .filter(Payment.booking_id == booking_id)
+        .populate_existing()
+        .one_or_none()
+    )
+
+    if payment is None:
+        return "NO_PAYMENT"
+
+    if payment.payer_id != owner.id:
+        return "FINANCIAL_REVIEW_REQUIRED"
+
+    if payment.financial_origin == "TEST":
+        return "TEST_NO_RELEASE"
+
+    if payment.financial_origin != "REAL":
+        return "FINANCIAL_REVIEW_REQUIRED"
+
+    if payment.status == PaymentStatus.RELEASED:
+        return "RELEASED"
+
+    if (
+        payment.status != PaymentStatus.APPROVED
+        or payment.dispute_opened_at is not None
+    ):
+        return "FINANCIAL_REVIEW_REQUIRED"
+
+    if not process:
+        return "PENDING_FINANCIAL_CONFIRMATION"
+
+    payment_id = payment.id
+
+    try:
+        confirmed = confirm_delivery(
+            db,
+            payment_id,
+            owner,
+        )
+
+        if (
+            confirmed.financial_origin == "REAL"
+            and confirmed.status == PaymentStatus.RELEASED
+        ):
+            return "RELEASED"
+
+        return "FINANCIAL_REVIEW_REQUIRED"
+
+    except HTTPException:
+        db.rollback()
+
+        # Another legitimate transaction may have
+        # completed financial confirmation already.
+
+        current = db.get(
+            Payment,
+            payment_id,
+            populate_existing=True,
+        )
+
+        if (
+            current is not None
+            and current.payer_id == owner.id
+            and current.financial_origin == "REAL"
+            and current.status == PaymentStatus.RELEASED
+        ):
+            return "RELEASED"
+
+        return "FINANCIAL_REVIEW_REQUIRED"

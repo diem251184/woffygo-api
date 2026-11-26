@@ -1,6 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from app.models.booking import ServiceType, BookingStatus
 from app.schemas.pet import PetResponse
 
@@ -42,6 +42,14 @@ class BookingQuoteResponse(BaseModel):
 class BookingStatusUpdateRequest(BaseModel):
     status: BookingStatus
     reason: str | None = None
+
+    # Required by the service for transport completion.
+    # SecretStr prevents accidental representation of PIN.
+    delivery_pin: SecretStr | None = Field(
+        default=None,
+        repr=False,
+        max_length=6,
+    )
 
 
 class BookingPetConditionsAtRequest(BaseModel):
@@ -101,6 +109,17 @@ class BookingLocationCreate(BaseModel):
     longitude: float
     accuracy_meters: float | None = None
     speed_kmh: float | None = None
+
+    # Actual device capture time.
+    # None means that capture time is not established.
+    captured_at: datetime | None = None
+
+    # Android-reported mock location indicator.
+    # None means that the indicator is unavailable.
+    is_mocked: bool | None = Field(
+        default=None,
+        strict=True,
+    )
 
 
 class BookingLocationDetail(BaseModel):

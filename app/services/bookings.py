@@ -1107,60 +1107,255 @@ def start_booking(db: Session, provider: User, booking_id: int) -> Booking:
     return booking
 
 
-def finish_booking(db: Session, provider: User, booking_id: int) -> Booking:
-    booking = get_booking_or_404(db, booking_id)
-    if booking.provider_id != provider.id:
+def finish_booking(
+    db: Session,
+    provider: User,
+    booking_id: int,
+    delivery_pin: str | None = None,
+) -> Booking:
+    from app.services.transport_arrival import (
+        evaluate_transport_arrival,
+    )
+
+    from app.services.transport_delivery import (
+        verify_delivery_pin,
+        consume_delivery_pin,
+    )
+
+    # Serialize completion with GPS ingestion
+    # and other delivery operations.
+
+    booking = (
+        db.query(Booking)
+        .filter(Booking.id == booking_id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+
+    if booking is None:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No estás asignado a esta reserva",
+            status_code=404,
+            detail="Reserva no encontrada",
         )
-    validate_status_transition(booking.status, BookingStatus.COMPLETED)
+
+    if (
+        provider.role != UserRole.WALKER
+        or booking.provider_id != provider.id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="No estas asignado a esta reserva",
+        )
+
+    validate_status_transition(
+        booking.status,
+        BookingStatus.COMPLETED,
+    )
+
+    credential = None
+
+    is_transport = (
+        booking.service_type == ServiceType.TRANSPORT
+    )
+
+    if is_transport:
+        if booking.status != BookingStatus.IN_PROGRESS:
+            raise HTTPException(
+                status_code=409,
+                detail="El traslado no esta en curso",
+            )
+
+        if delivery_pin is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Se requiere el PIN de entrega",
+            )
+
+        arrival = evaluate_transport_arrival(
+            db,
+            booking,
+        )
+
+        if not arrival.eligible:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "TRANSPORT_ARRIVAL_REQUIRED",
+                    "reason": arrival.reason,
+                    "message": (
+                        "La llegada al destino todavia "
+                        "no esta acreditada"
+                    ),
+                },
+            )
+
+        credential = verify_delivery_pin(
+            db,
+            booking,
+            provider.id,
+            delivery_pin,
+        )
+
+        if credential is None:
+            # Persist failed attempts before returning
+            # the HTTP rejection. No booking completion
+            # or payment modification has occurred.
+
+            db.commit()
+
+            raise HTTPException(
+                status_code=403,
+                detail="PIN de entrega incorrecto",
+            )
+
+        # Recheck arrival immediately before consumption.
+        # Both the booking and credential remain locked.
+
+        arrival = evaluate_transport_arrival(
+            db,
+            booking,
+        )
+
+        if not arrival.eligible:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "TRANSPORT_ARRIVAL_REQUIRED",
+                    "reason": arrival.reason,
+                    "message": (
+                        "La evidencia GPS debe actualizarse"
+                    ),
+                },
+            )
+
+    # Booking completion and PIN consumption are atomic.
+
+    if credential is not None:
+        consume_delivery_pin(
+            db,
+            credential,
+        )
 
     booking.status = BookingStatus.COMPLETED
     booking.finished_at = _now()
 
-    profile = db.query(WalkerProfile).filter(WalkerProfile.user_id == provider.id).first()
+    profile = (
+        db.query(WalkerProfile)
+        .filter(
+            WalkerProfile.user_id == provider.id
+        )
+        .with_for_update()
+        .first()
+    )
+
     if profile:
         profile.total_walks += 1
+
+    # Stage the existing escrow deadline inside the
+    # same transaction as booking completion and PIN use.
+    # No payment release is performed here.
+
+    start_escrow_window(
+        db,
+        booking.id,
+        commit=False,
+    )
 
     db.commit()
     db.refresh(booking)
 
-    start_escrow_window(db, booking.id)
-
     try:
+        if is_transport:
+            notification_title = "Traslado completado"
+            notification_body = (
+                "El prestador informo la entrega de tu "
+                "mascota en el destino. Confirma la recepcion."
+            )
+        else:
+            notification_title = "Servicio completado"
+            notification_body = (
+                "Tu mascota est\u00e1 de regreso. "
+                "Por favor confirma la entrega "
+                "para liberar el pago."
+            )
+
         push.send_to_user(
             db,
             booking.owner_id,
-            "Servicio completado",
-            "Tu mascota está de regreso. Por favor confirma la entrega para liberar el pago.",
-            {"type": "booking_finished", "booking_id": booking.id},
+            notification_title,
+            notification_body,
+            {
+                "type": "booking_finished",
+                "booking_id": booking.id,
+            },
         )
+
     except Exception as e:
-        print(f"[push] Error notificando finalización: {e}")
+        print(
+            "[push] Error notificando finalizacion:",
+            type(e).__name__,
+        )
 
     return booking
 
 
-def cancel_booking(db: Session, user: User, booking_id: int, reason: str | None) -> Booking:
-    booking = get_booking_or_404(db, booking_id)
-    validate_status_transition(booking.status, BookingStatus.CANCELLED)
+def cancel_booking(
+    db: Session,
+    user: User,
+    booking_id: int,
+    reason: str | None,
+) -> Booking:
+    from app.services.transport_delivery import (
+        invalidate_delivery_pin,
+    )
+
+    booking = (
+        db.query(Booking)
+        .filter(Booking.id == booking_id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+
+    if booking is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Reserva no encontrada",
+        )
 
     is_owner = booking.owner_id == user.id
     is_provider = booking.provider_id == user.id
 
-    if not (is_owner or is_provider or user.role == UserRole.ADMIN):
+    if not (
+        is_owner
+        or is_provider
+        or user.role == UserRole.ADMIN
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No tienes permiso para cancelar esta reserva",
+        )
+
+    validate_status_transition(
+        booking.status,
+        BookingStatus.CANCELLED,
+    )
+
+    if booking.service_type == ServiceType.TRANSPORT:
+        invalidate_delivery_pin(
+            db,
+            booking.id,
         )
 
     booking.status = BookingStatus.CANCELLED
     booking.cancelled_at = _now()
     booking.cancel_reason = reason
     booking.cancelled_by_id = user.id
+
     db.commit()
     db.refresh(booking)
+
     return booking
 
 

@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from pydantic import field_validator
+from pydantic import field_validator, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +14,9 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str
     SECRET_KEY: str
+
+    # Independent transport delivery secret.
+    WOFFY_TRANSPORT_DELIVERY_KEY_V1: SecretStr | None = None
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 

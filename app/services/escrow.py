@@ -27,15 +27,37 @@ def _get_payment_or_404(db: Session, payment_id: int) -> Payment:
     return payment
 
 
-def start_escrow_window(db: Session, booking_id: int) -> Payment | None:
-    payment = db.query(Payment).filter(Payment.booking_id == booking_id).first()
-    if payment is None or payment.status != PaymentStatus.APPROVED:
+def start_escrow_window(
+    db: Session,
+    booking_id: int,
+    *,
+    commit: bool = True,
+) -> Payment | None:
+    payment = (
+        db.query(Payment)
+        .filter(Payment.booking_id == booking_id)
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+
+    if (
+        payment is None
+        or payment.status != PaymentStatus.APPROVED
+    ):
         return None
+
     if payment.payment_release_deadline is not None:
         return payment
-    payment.payment_release_deadline = _now() + timedelta(hours=ESCROW_WINDOW_HOURS)
-    db.commit()
-    db.refresh(payment)
+
+    payment.payment_release_deadline = (
+        _now() + timedelta(hours=ESCROW_WINDOW_HOURS)
+    )
+
+    if commit:
+        db.commit()
+        db.refresh(payment)
+
     return payment
 
 
@@ -128,8 +150,25 @@ def confirm_delivery(db: Session, payment_id: int, current_user: User) -> Paymen
             detail="El origen financiero no permite liberar fondos",
         )
 
-    payment.confirmed_by_owner_at = _now()
+    from app.models.booking import ServiceType
+
+    if (
+        booking.service_type == ServiceType.TRANSPORT
+        and booking.owner_id != current_user.id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Confirmacion no autorizada",
+        )
+
+    _assert_transport_delivery_evidence(
+        db,
+        booking,
+        require_owner_receipt=True,
+    )
+
     _assert_no_financial_alerts(db, payment)
+    payment.confirmed_by_owner_at = _now()
     payment.status = PaymentStatus.RELEASED
     _record_internal_payment_transition(db, payment, PaymentStatus.APPROVED, "escrow_owner_confirm")
     payment.released_at = _now()
@@ -187,6 +226,13 @@ def release_payment(db: Session, payment_id: int) -> Payment:
             detail="El origen financiero no permite liberar fondos",
         )
 
+    _assert_transport_delivery_evidence(
+        db,
+        booking,
+        enforce_custody=True,
+        payment=payment,
+    )
+
     _assert_no_financial_alerts(db, payment)
     payment.status = PaymentStatus.RELEASED
     _record_internal_payment_transition(db, payment, PaymentStatus.APPROVED, "escrow_manual_release")
@@ -218,6 +264,27 @@ def release_expired_payments(db: Session) -> list[int]:
     for payment in expired:
         if payment.financial_origin != "REAL":
             continue
+        booking = db.get(
+            Booking,
+            payment.booking_id,
+            populate_existing=True,
+        )
+
+        try:
+            _assert_transport_delivery_evidence(
+                db,
+                booking,
+                enforce_custody=True,
+                payment=payment,
+            )
+
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+
+            # Skip only the ineligible delivery.
+            continue
+
         _assert_no_financial_alerts(db, payment)
         payment.status = PaymentStatus.RELEASED
         _record_internal_payment_transition(db, payment, PaymentStatus.APPROVED, "escrow_expiry_release")
@@ -254,6 +321,17 @@ def resolve_dispute(
                 detail="El origen financiero no permite liberar fondos",
             )
 
+        booking = db.get(
+            Booking,
+            payment.booking_id,
+            populate_existing=True,
+        )
+
+        _assert_transport_delivery_evidence(
+            db,
+            booking,
+        )
+
         resolved_at = _now()
         _assert_no_financial_alerts(db, payment)
         payment.status = PaymentStatus.RELEASED
@@ -278,3 +356,106 @@ def resolve_dispute(
     db.commit()
     db.refresh(payment)
     return payment
+
+def _assert_transport_delivery_evidence(
+    db: Session,
+    booking,
+    *,
+    require_owner_receipt: bool = False,
+    enforce_custody: bool = False,
+    payment=None,
+) -> None:
+    from app.models.booking import ServiceType
+    from app.models.transport_delivery_credential import (
+        TransportDeliveryCredential,
+    )
+
+    if booking is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Reserva vinculada no disponible",
+        )
+
+    # Preserve the existing WALK financial policy.
+
+    if booking.service_type != ServiceType.TRANSPORT:
+        return
+
+    if (
+        booking.status != BookingStatus.COMPLETED
+        or booking.started_at is None
+        or booking.finished_at is None
+        or booking.provider_id is None
+        or booking.finished_at < booking.started_at
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="El traslado no tiene una entrega completada",
+        )
+
+    credential = (
+        db.query(TransportDeliveryCredential)
+        .filter(
+            TransportDeliveryCredential.booking_id
+            == booking.id
+        )
+        .populate_existing()
+        .one_or_none()
+    )
+
+    if (
+        credential is None
+        or credential.used_at is None
+        or credential.invalidated_at is not None
+        or credential.used_at < booking.started_at
+        or credential.used_at > booking.finished_at
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="La entrega segura del traslado no esta acreditada",
+        )
+
+    received_at = credential.owner_received_at
+
+    if (
+        received_at is not None
+        and received_at < credential.used_at
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="La recepcion registrada no es consistente",
+        )
+
+    if require_owner_receipt and received_at is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Primero debe confirmar la recepcion del traslado",
+        )
+
+    if enforce_custody:
+        if payment is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Pago vinculado no disponible",
+            )
+
+        if (
+            payment.booking_id != booking.id
+            or payment.payer_id != booking.owner_id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="El pago no coincide con el traslado",
+            )
+
+        if received_at is None:
+            deadline = payment.payment_release_deadline
+
+            if (
+                deadline is None
+                or deadline > _now()
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="El plazo de custodia del traslado sigue vigente",
+                )
