@@ -1710,7 +1710,7 @@ def renew_owner_transport_delivery_pin(
     db: Session = Depends(get_db),
 ):
     """
-    Rotate the private delivery PIN.
+    Rotate the private delivery PIN without returning it.
 
     Only the owner of an active transport may obtain it.
     """
@@ -1747,7 +1747,7 @@ def renew_owner_transport_delivery_pin(
             detail="PIN de entrega no disponible",
         )
 
-    pin = renew_owner_delivery_pin(
+    renew_owner_delivery_pin(
         db,
         booking,
         current_user.id,
@@ -1755,15 +1755,15 @@ def renew_owner_transport_delivery_pin(
 
     booking_identifier = booking.id
 
-    # Credential creation must be persisted before
-    # exposing the PIN to the authorized owner.
+    # Persist credential rotation before confirming success.
+    # Never include the replacement PIN in this response.
 
     db.commit()
 
     return JSONResponse(
         content={
             "booking_id": booking_identifier,
-            "delivery_pin": pin,
+            "renewed": True,
         },
         headers={
             "Cache-Control": (
