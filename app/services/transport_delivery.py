@@ -388,3 +388,138 @@ def invalidate_delivery_pin(
     ):
         credential.invalidated_at = _now()
         db.flush()
+
+DELIVERY_RENEWAL_MINUTES = 5
+
+
+def renew_owner_delivery_pin(
+    db: Session,
+    booking: Booking,
+    owner_id: int,
+) -> str:
+    """
+    Rotate the private delivery credential.
+
+    Caller must authenticate OWNER, lock the booking
+    row and commit before exposing the replacement PIN.
+
+    Existing failed attempts and lock deadlines must
+    never be reset by renewal.
+
+    created_at identifies the current PIN generation.
+    """
+
+    if booking.owner_id != owner_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Reserva no encontrada",
+        )
+
+    _validate_booking(booking)
+
+    credential = _credential_locked(
+        db, booking.id
+    )
+
+    if credential is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Primero debe obtener el PIN de entrega",
+        )
+
+    _ensure_unused(credential)
+
+    if credential.owner_received_at is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="La recepcion ya fue registrada",
+        )
+
+    now = _now()
+
+    if (
+        credential.locked_until is not None
+        and credential.locked_until > now
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail="Validacion de entrega temporalmente bloqueada",
+        )
+
+    if (
+        now < credential.created_at
+        + timedelta(minutes=DELIVERY_RENEWAL_MINUTES)
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail="Aguarda cinco minutos entre renovaciones",
+        )
+
+    old_key = _delivery_key(
+        credential.key_version
+    )
+
+    old_context = _credential_context(
+        booking,
+        credential.generation_nonce,
+        credential.key_version,
+    )
+
+    old_pin = _derive_pin(
+        old_key, old_context
+    )
+
+    old_verifier = _pin_verifier(
+        old_key, old_context, old_pin
+    )
+
+    if not hmac.compare_digest(
+        credential.pin_verifier,
+        old_verifier,
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="Credencial de entrega no disponible",
+        )
+
+    version = DELIVERY_KEY_VERSION
+    key = _delivery_key(version)
+
+    for _ in range(128):
+
+        nonce = secrets.token_hex(32)
+
+        if nonce == credential.generation_nonce:
+            continue
+
+        context = _credential_context(
+            booking, nonce, version
+        )
+
+        pin = _derive_pin(key, context)
+
+        # Never issue the immediately previous PIN.
+
+        if hmac.compare_digest(pin, old_pin):
+            continue
+
+        credential.generation_nonce = nonce
+        credential.key_version = version
+
+        credential.pin_verifier = _pin_verifier(
+            key, context, pin
+        )
+
+        credential.created_at = now
+
+        # Preserve failed_attempts and locked_until.
+        # Do not change the booking or its payment.
+
+        db.flush()
+
+        return pin
+
+    raise HTTPException(
+        status_code=503,
+        detail="No se pudo renovar la entrega",
+    )

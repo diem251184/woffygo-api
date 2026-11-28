@@ -55,6 +55,7 @@ class DeliveryProtectedRoute(APIRoute):
         sensitive_route = (
             self.path.endswith("/{booking_id}/status")
             or self.path.endswith("/{booking_id}/delivery-pin")
+            or self.path.endswith("/{booking_id}/delivery-pin/renew")
             or self.path.endswith("/{booking_id}/delivery-receipt")
         )
 
@@ -1672,6 +1673,81 @@ def get_owner_transport_delivery_pin(
         )
 
     pin = get_or_create_owner_delivery_pin(
+        db,
+        booking,
+        current_user.id,
+    )
+
+    booking_identifier = booking.id
+
+    # Credential creation must be persisted before
+    # exposing the PIN to the authorized owner.
+
+    db.commit()
+
+    return JSONResponse(
+        content={
+            "booking_id": booking_identifier,
+            "delivery_pin": pin,
+        },
+        headers={
+            "Cache-Control": (
+                "no-store, no-cache, private, "
+                "max-age=0, must-revalidate"
+            ),
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@router.post("/{booking_id}/delivery-pin/renew")
+def renew_owner_transport_delivery_pin(
+    booking_id: int,
+    current_user: User = Depends(
+        require_role(UserRole.OWNER)
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Rotate the private delivery PIN.
+
+    Only the owner of an active transport may obtain it.
+    """
+
+    from fastapi.responses import JSONResponse
+
+    from app.services.transport_delivery import (
+        renew_owner_delivery_pin,
+    )
+
+    booking = (
+        db.query(Booking)
+        .filter(Booking.id == booking_id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+
+    if (
+        booking is None
+        or booking.owner_id != current_user.id
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Reserva no encontrada",
+        )
+
+    if (
+        booking.service_type != ServiceType.TRANSPORT
+        or booking.status != BookingStatus.IN_PROGRESS
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="PIN de entrega no disponible",
+        )
+
+    pin = renew_owner_delivery_pin(
         db,
         booking,
         current_user.id,
