@@ -295,11 +295,72 @@ def _mp_qa_expected_accounts():
     return collector, payer
 
 
+
+def _mp_qa_seller_attested(token, expected_collector):
+    """Require independent TEST seller evidence from Mercado Pago."""
+
+    import json
+    import urllib.request
+    import urllib.error
+
+    if (
+        not _mp_qa_credential_matches(token)
+        or _mp_qa_positive_id(expected_collector) is None
+    ):
+        return False
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    request = urllib.request.Request(
+        "https://api.mercadopago.com/users/me",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+
+    try:
+        opener = urllib.request.build_opener(NoRedirect())
+
+        with opener.open(request, timeout=8) as response:
+            if response.status != 200:
+                return False
+
+            raw = response.read(262145)
+
+            if len(raw) > 262144:
+                return False
+
+            seller = json.loads(raw)
+
+        if not isinstance(seller, dict):
+            return False
+
+        tags = seller.get("tags")
+
+        return (
+            _mp_qa_positive_id(seller.get("id"))
+            == _mp_qa_positive_id(expected_collector)
+            and seller.get("site_id") == "MLA"
+            and isinstance(tags, list)
+            and "test_user" in tags
+        )
+
+    except Exception:
+        # Do not expose credentials or provider response bodies.
+        return False
+
+
 def _mp_qa_payment_allowed(mp_payment):
     if not isinstance(mp_payment, dict):
         return False
 
-    if mp_payment.get("live_mode") is not False:
+    live_mode = mp_payment.get("live_mode")
+
+    if type(live_mode) is not bool:
         return False
 
     accounts = _mp_qa_expected_accounts()
@@ -312,11 +373,22 @@ def _mp_qa_payment_allowed(mp_payment):
     if not isinstance(payer, dict):
         return False
 
-    return (
+    if not (
         _mp_qa_positive_id(mp_payment.get("collector_id"))
         == accounts[0]
         and _mp_qa_positive_id(payer.get("id"))
         == accounts[1]
+    ):
+        return False
+
+    if live_mode is False:
+        return True
+
+    # A true live_mode requires independent seller attestation.
+    # Existing TEST scope, origin and attempt checks remain mandatory.
+    return _mp_qa_seller_attested(
+        settings.MERCADOPAGO_ACCESS_TOKEN,
+        accounts[0],
     )
 
 
